@@ -8,11 +8,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
@@ -41,6 +45,20 @@ func writeFile(values *[]*model.SampleStream, fileNum uint) error {
 		return err
 	}
 	return ioutil.WriteFile(filename, valuesJSON, 0644)
+}
+
+func cleanFiles() error {
+	files, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", *out))
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		err = os.Remove(file)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func main() {
@@ -76,40 +94,69 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	api := v1.NewAPI(client)
+	promApi := v1.NewAPI(client)
+
+	allBatchesFetched := false
 
 	values := make([]*model.SampleStream, 0, 0)
 	fileNum := uint(0)
-	for batch := uint(1); batch <= batches; batch++ {
-		queryTS := beginTS.Add(*batchDur * time.Duration(batch))
-		lookback := batchDur.Seconds()
-		if queryTS.After(endTS) {
-			lookback -= queryTS.Sub(endTS).Seconds()
-			queryTS = endTS
-		}
+	// There's no way to restart a loop iteration in golang, so apply brute force and ignorance to batch size backoff
+	for allBatchesFetched == false {
+		batches = uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
+		for batch := uint(1); batch <= batches; batch++ {
+			queryTS := beginTS.Add(*batchDur * time.Duration(batch))
+			lookback := batchDur.Seconds()
+			if queryTS.After(endTS) {
+				lookback -= queryTS.Sub(endTS).Seconds()
+				queryTS = endTS
+			}
 
-		query := fmt.Sprintf("%s[%ds]", *metric, int64(lookback))
-		log.Printf("Querying %s at %v", query, queryTS)
-		value, _, err := api.Query(ctx, query, queryTS)
+			query := fmt.Sprintf("%s[%ds]", *metric, int64(lookback))
+			log.Printf("Querying %s at %v", query, queryTS)
+			// TODO: Add support for overriding the timeout; remember it can only go *smaller*
+			value, _, err := promApi.Query(ctx, query, queryTS)
 
-		if err != nil {
-			log.Fatal(err)
-		}
+			if err != nil {
+				// This is horrible but the golang prometheus_client swallows the 422 HTTP return code, so we have to
+				// scrape instead :(
+				tooManySamples, err := regexp.Match("query processing would load too many samples into memory", []byte(err.Error()))
+				if tooManySamples {
+					newBatchDur := time.Duration(batchDur.Nanoseconds() / 2)
+					log.Printf("Too many samples in result set. Reducing batch size from %v to %v and trying again.", batchDur, newBatchDur)
+					err := cleanFiles()
+					fileNum = 0
+					if err != nil {
+						log.Fatal(fmt.Sprintf("failed to clean up stale export files: %s", err))
+					}
+					*batchDur = newBatchDur
+					if batchDur.Seconds() <= 1 {
+						log.Fatal(errors.New("failed to query Prometheus - too much data even at minimum batch size"))
+					}
+					break
+				} else {
+					log.Fatal(err)
+				}
+			}
 
-		if value == nil {
-			log.Fatal("did not return results")
-		}
+			if value == nil {
+				log.Fatal("did not return results")
+			}
 
-		if value.Type() != model.ValMatrix {
-			log.Fatalf("Expected matrix value type; got %v", value.Type())
-		}
-		// model/value.go says: type Matrix []*SampleStream
-		values = append(values, value.(model.Matrix)...)
+			if value.Type() != model.ValMatrix {
+				log.Fatalf("Expected matrix value type; got %v", value.Type())
+			}
+			// model/value.go says: type Matrix []*SampleStream
+			values = append(values, value.(model.Matrix)...)
 
-		if batch%*batchesPerFile == 0 {
-			writeFile(&values, fileNum)
-			values = make([]*model.SampleStream, 0, 0)
-			fileNum++
+			if batch%*batchesPerFile == 0 {
+				writeFile(&values, fileNum)
+				values = make([]*model.SampleStream, 0, 0)
+				fileNum++
+			}
+			// If this is the last batch,
+			if batch == batches {
+				allBatchesFetched = true
+			}
 		}
 	}
 	writeFile(&values, fileNum)
