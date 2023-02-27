@@ -1,7 +1,7 @@
 // promdump fetches time series points for a given metric from Prometheus server
 // and saves them into a series of json files. Files contain a serialized list of
 // SampleStream messages (see model/value.go).
-// Gemerated files can later be read by promremotewrite which will write the
+// Generated files can later be read by promremotewrite which will write the
 // points to a Prometheus remote storage.
 package main
 
@@ -15,7 +15,6 @@ import (
 	"log"
 	"math"
 	"os"
-	"path/filepath"
 	"regexp"
 	"time"
 
@@ -36,6 +35,10 @@ var (
 
 // dump a slice of SampleStream messages to a json file.
 func writeFile(values *[]*model.SampleStream, fileNum uint) error {
+	/*
+	   This check is duplicated here because we call writeFile unconditionally to flush any pending writes before
+	   exiting and we don't want to print a stray "Writing 0 results to file" line.
+	*/
 	if len(*values) == 0 {
 		return nil
 	}
@@ -44,21 +47,25 @@ func writeFile(values *[]*model.SampleStream, fileNum uint) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("Writing %v results to file %v", len(*values), filename)
 	return ioutil.WriteFile(filename, valuesJSON, 0644)
 }
 
-func cleanFiles() error {
-	files, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", *out))
-	if err != nil {
-		return err
-	}
-	for _, file := range files {
-		err = os.Remove(file)
+func cleanFiles(fileNum uint) (uint, error) {
+	for i := uint(0); i < fileNum; i++ {
+		filename := fmt.Sprintf("%s.%05d", *out, i)
+		//log.Printf("Removing stale output file %v", filename)
+		err := os.Remove(filename)
 		if err != nil {
-			return err
+			// If removal of the first file fails, we have removed 0 files.
+			log.Printf("%v stale output file(s) removed. Removal of file %v failed.", i, filename)
+			return i, err
 		}
 	}
-	return nil
+	if fileNum > 0 {
+		log.Printf("%v stale output file(s) removed.", fileNum)
+	}
+	return fileNum, nil
 }
 
 func main() {
@@ -103,6 +110,9 @@ func main() {
 	// There's no way to restart a loop iteration in golang, so apply brute force and ignorance to batch size backoff
 	for allBatchesFetched == false {
 		batches = uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
+		if batches > 99999 {
+			log.Fatal(fmt.Sprintf("batch settings could generate %v batches, which is an unreasonable number of batches", batches))
+		}
 		for batch := uint(1); batch <= batches; batch++ {
 			queryTS := beginTS.Add(*batchDur * time.Duration(batch))
 			lookback := batchDur.Seconds()
@@ -119,11 +129,11 @@ func main() {
 			if err != nil {
 				// This is horrible but the golang prometheus_client swallows the 422 HTTP return code, so we have to
 				// scrape instead :(
-				tooManySamples, err := regexp.Match("query processing would load too many samples into memory", []byte(err.Error()))
+				tooManySamples, _ := regexp.Match("query processing would load too many samples into memory", []byte(err.Error()))
 				if tooManySamples {
 					newBatchDur := time.Duration(batchDur.Nanoseconds() / 2)
 					log.Printf("Too many samples in result set. Reducing batch size from %v to %v and trying again.", batchDur, newBatchDur)
-					err := cleanFiles()
+					_, err := cleanFiles(fileNum)
 					fileNum = 0
 					if err != nil {
 						log.Fatal(fmt.Sprintf("failed to clean up stale export files: %s", err))
@@ -149,15 +159,25 @@ func main() {
 			values = append(values, value.(model.Matrix)...)
 
 			if batch%*batchesPerFile == 0 {
-				writeFile(&values, fileNum)
-				values = make([]*model.SampleStream, 0, 0)
-				fileNum++
+				if len(values) > 0 {
+					err = writeFile(&values, fileNum)
+					if err != nil {
+						log.Fatalf("batch write failed with: %v", err)
+					}
+					fileNum++
+					values = make([]*model.SampleStream, 0, 0)
+				} else {
+					log.Println("No results for this query, skipping write.")
+				}
 			}
-			// If this is the last batch,
+			// If this is the last batch, exit the outer loop
 			if batch == batches {
 				allBatchesFetched = true
 			}
 		}
 	}
-	writeFile(&values, fileNum)
+	err = writeFile(&values, fileNum)
+	if err != nil {
+		log.Fatalf("batch write failed with: %v", err)
+	}
 }
