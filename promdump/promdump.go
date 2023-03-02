@@ -23,7 +23,11 @@ import (
 	"github.com/prometheus/common/model"
 )
 
+var appVersion = "0.1.0"
+
 var (
+	// Also see init() below for aliases
+	version        = flag.Bool("version", false, "prints the promdump version and exits")
 	baseURL        = flag.String("url", "http://localhost:9090", "URL for Prometheus server API")
 	endTime        = flag.String("timestamp", "", "timestamp to end querying at (RFC3339). Defaults to current time.")
 	periodDur      = flag.Duration("period", 7*24*time.Hour, "time period to get data for (ending at --timestamp)")
@@ -68,8 +72,19 @@ func cleanFiles(fileNum uint) (uint, error) {
 	return fileNum, nil
 }
 
+func init() {
+	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
+}
+
 func main() {
 	flag.Parse()
+
+	if *version {
+		fmt.Printf("promdump version %v\n", appVersion)
+		os.Exit(0)
+	}
+
+	log.Printf("Starting promdump version %v\n", appVersion)
 
 	if *metric == "" || *out == "" {
 		log.Fatalln("Please specify --metric and --out")
