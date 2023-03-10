@@ -23,15 +23,18 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-var appVersion = "0.1.0"
+const appVersion = "0.1.1"
+const defaultPeriod = 7 * 24 * time.Hour // 7 days
+const defaultBatchDuration = 24 * time.Hour
 
 var (
 	// Also see init() below for aliases
 	version        = flag.Bool("version", false, "prints the promdump version and exits")
 	baseURL        = flag.String("url", "http://localhost:9090", "URL for Prometheus server API")
-	endTime        = flag.String("timestamp", "", "timestamp to end querying at (RFC3339). Defaults to current time.")
-	periodDur      = flag.Duration("period", 7*24*time.Hour, "time period to get data for (ending at --timestamp)")
-	batchDur       = flag.Duration("batch", 24*time.Hour, "batch size: time period for each query to Prometheus server.")
+	startTime      = flag.String("start_time", "", "timestamp to start querying at (RFC3339).")
+	endTime        = flag.String("end_time", "", "timestamp to end querying at (RFC3339). Defaults to current time.")
+	periodDur      = flag.Duration("period", 0, "time period to get data for")
+	batchDur       = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
 	metric         = flag.String("metric", "", "metric to fetch (can include label values)")
 	out            = flag.String("out", "", "output file prefix")
 	batchesPerFile = flag.Uint("batches_per_file", 1, "batches per output file")
@@ -72,8 +75,75 @@ func cleanFiles(fileNum uint) (uint, error) {
 	return fileNum, nil
 }
 
+func getRangeTimestamps(startTime string, endTime string, period time.Duration) (time.Time, time.Time, time.Duration, error) {
+	var err error
+	var startTS, endTS time.Time
+
+	err = nil
+
+	badTime := time.Time{}
+
+	if startTime != "" && endTime != "" && period != 0 {
+		return badTime, badTime, 0, errors.New("only two of start time, end time, and duration may be specified when calculating Prometheus query range")
+	}
+
+	// If neither the start time nor end time are specified, use the default end time for backward compatibility
+	if startTime == "" && endTime == "" {
+		endTS = time.Now()
+	}
+
+	// Parse any provided time strings into Go times
+	if startTime != "" {
+		startTS, err = time.Parse(time.RFC3339, startTime)
+		if err != nil {
+			return badTime, badTime, 0, err
+		}
+	}
+	if endTime != "" {
+		endTS, err = time.Parse(time.RFC3339, endTime)
+		if err != nil {
+			return badTime, badTime, 0, err
+		}
+	}
+
+	// If the caller did not provide a period, we need to calculate it if possible or use the default if not
+	if period == 0 {
+		if startTime != "" && endTime != "" {
+			// If both start time and end time are specified, the period is the difference
+			period = endTS.Sub(startTS)
+		} else {
+			// In all other cases, the period should be the default
+			period = defaultPeriod
+		}
+	}
+
+	// When we reach this point, we are guaranteed to have one timestamp and the period,
+	// so calculate the other timestamp if needed
+	if startTS.IsZero() {
+		startTS = endTS.Add(-period)
+	} else if endTS.IsZero() {
+		endTS = startTS.Add(period)
+	}
+
+	if startTS.After(time.Now()) {
+		return badTime, badTime, 0, errors.New("start time must be in the past")
+	}
+
+	if startTS.After(endTS) {
+		return badTime, badTime, 0, errors.New("start time is after end time, which is not permitted")
+	}
+
+	// Don't query past the current time because that would be dumb
+	if endTS.After(time.Now()) {
+		endTS = time.Now()
+	}
+
+	return startTS, endTS, period, nil
+}
+
 func init() {
 	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
+	flag.StringVar(endTime, "timestamp", "", "alias for end_time")
 }
 
 func main() {
@@ -90,26 +160,24 @@ func main() {
 		log.Fatalln("Please specify --metric and --out")
 	}
 
+	if *startTime != "" && *endTime != "" && *periodDur != 0 {
+		log.Fatalln("Too many time arguments. Specify either --start_time and --end_time or a time and --period.")
+	}
+
+	var beginTS, endTS time.Time
+	var err error
+	beginTS, endTS, *periodDur, err = getRangeTimestamps(*startTime, *endTime, *periodDur)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// This check has moved below timestamp calculations because the period may now be a calculated value
 	if periodDur.Nanoseconds()%1e9 != 0 || batchDur.Nanoseconds()%1e9 != 0 {
 		log.Fatalln("--period and --batch must not have fractional seconds")
 	}
 	if *batchDur > *periodDur {
 		batchDur = periodDur
 	}
-
-	endTS := time.Now()
-	if *endTime != "" {
-		var err error
-		endTS, err = time.Parse(time.RFC3339, *endTime)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-
-	beginTS := endTS.Add(-*periodDur)
-	batches := uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
-
-	log.Printf("Will query from %v to %v in %v batches\n", beginTS, endTS, batches)
 
 	ctx := context.Background()
 	client, err := api.NewClient(api.Config{Address: *baseURL})
@@ -124,10 +192,11 @@ func main() {
 	fileNum := uint(0)
 	// There's no way to restart a loop iteration in golang, so apply brute force and ignorance to batch size backoff
 	for allBatchesFetched == false {
-		batches = uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
+		batches := uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
 		if batches > 99999 {
 			log.Fatal(fmt.Sprintf("batch settings could generate %v batches, which is an unreasonable number of batches", batches))
 		}
+		log.Printf("Will query from %v to %v in %v batches\n", beginTS, endTS, batches)
 		for batch := uint(1); batch <= batches; batch++ {
 			queryTS := beginTS.Add(*batchDur * time.Duration(batch))
 			lookback := batchDur.Seconds()
