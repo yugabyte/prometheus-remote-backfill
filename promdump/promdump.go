@@ -23,7 +23,7 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-const appVersion = "0.1.1"
+const appVersion = "0.1.2"
 const defaultPeriod = 7 * 24 * time.Hour // 7 days
 const defaultBatchDuration = 24 * time.Hour
 
