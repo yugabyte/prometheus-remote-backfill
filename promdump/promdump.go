@@ -15,6 +15,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"time"
 
@@ -31,7 +32,7 @@ var (
 	// Also see init() below for aliases
 	version        = flag.Bool("version", false, "prints the promdump version and exits")
 	baseURL        = flag.String("url", "http://localhost:9090", "URL for Prometheus server API")
-	startTime      = flag.String("start_time", "", "timestamp to start querying at (RFC3339).")
+	startTime      = flag.String("start_time", "", "timestamp to start querying at (RFC3339, e.g. 2023-03-13T01:00:00-0100).")
 	endTime        = flag.String("end_time", "", "timestamp to end querying at (RFC3339). Defaults to current time.")
 	periodDur      = flag.Duration("period", 0, "time period to get data for")
 	batchDur       = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
@@ -40,8 +41,13 @@ var (
 	batchesPerFile = flag.Uint("batches_per_file", 1, "batches per output file")
 )
 
+func init() {
+	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
+	flag.StringVar(endTime, "timestamp", "", "alias for end_time")
+}
+
 // dump a slice of SampleStream messages to a json file.
-func writeFile(values *[]*model.SampleStream, fileNum uint) error {
+func writeFile(values *[]*model.SampleStream, filePrefix string, fileNum uint) error {
 	/*
 	   This check is duplicated here because we call writeFile unconditionally to flush any pending writes before
 	   exiting and we don't want to print a stray "Writing 0 results to file" line.
@@ -49,28 +55,27 @@ func writeFile(values *[]*model.SampleStream, fileNum uint) error {
 	if len(*values) == 0 {
 		return nil
 	}
-	filename := fmt.Sprintf("%s.%05d", *out, fileNum)
+	filename := fmt.Sprintf("%s.%05d", filePrefix, fileNum)
 	valuesJSON, err := json.Marshal(values)
 	if err != nil {
 		return err
 	}
-	log.Printf("Writing %v results to file %v", len(*values), filename)
+	log.Printf("writeFile: writing %v results to file %v", len(*values), filename)
 	return ioutil.WriteFile(filename, valuesJSON, 0644)
 }
 
-func cleanFiles(fileNum uint) (uint, error) {
+func cleanFiles(filePrefix string, fileNum uint) (uint, error) {
 	for i := uint(0); i < fileNum; i++ {
-		filename := fmt.Sprintf("%s.%05d", *out, i)
-		//log.Printf("Removing stale output file %v", filename)
+		filename := fmt.Sprintf("%s.%05d", filePrefix, i)
 		err := os.Remove(filename)
 		if err != nil {
 			// If removal of the first file fails, we have removed 0 files.
-			log.Printf("%v stale output file(s) removed. Removal of file %v failed.", i, filename)
+			log.Printf("cleanFiles: %v stale output file(s) removed. Removal of file %v failed.", i, filename)
 			return i, err
 		}
 	}
 	if fileNum > 0 {
-		log.Printf("%v stale output file(s) removed.", fileNum)
+		log.Printf("cleanFiles: %v stale output file(s) removed.", fileNum)
 	}
 	return fileNum, nil
 }
@@ -141,9 +146,91 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 	return startTS, endTS, period, nil
 }
 
-func init() {
-	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
-	flag.StringVar(endTime, "timestamp", "", "alias for end_time")
+func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration, batchesPerFile uint, filePrefix string) error {
+	matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", filePrefix))
+	if err != nil {
+		return err
+	}
+	if len(matches) > 0 {
+		// No error = file already exists
+		return errors.New(fmt.Sprintf("found %v existing export files with file prefix %v; move any existing export files aside before proceeding", len(matches), filePrefix))
+	}
+
+	allBatchesFetched := false
+
+	values := make([]*model.SampleStream, 0, 0)
+	fileNum := uint(0)
+	// There's no way to restart a loop iteration in golang, so apply brute force and ignorance to batch size backoff
+	for allBatchesFetched == false {
+		batches := uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
+		if batches > 99999 {
+			return errors.New(fmt.Sprintf("batch settings could generate %v batches, which is an unreasonable number of batches", batches))
+		}
+		log.Printf("exportMetric: querying from %v to %v in %v batches\n", beginTS, endTS, batches)
+		for batch := uint(1); batch <= batches; batch++ {
+			queryTS := beginTS.Add(batchDur * time.Duration(batch))
+			lookback := batchDur.Seconds()
+			if queryTS.After(endTS) {
+				lookback -= queryTS.Sub(endTS).Seconds()
+				queryTS = endTS
+			}
+
+			query := fmt.Sprintf("%s[%ds]", metric, int64(lookback))
+			log.Printf("exportMetric: querying %s ending at timestamp %v", query, queryTS.Format(time.RFC3339))
+			// TODO: Add support for overriding the timeout; remember it can only go *smaller*
+			value, _, err := promApi.Query(ctx, query, queryTS)
+
+			if err != nil {
+				// This is horrible but the golang prometheus_client swallows the 422 HTTP return code, so we have to
+				// scrape instead :(
+				tooManySamples, _ := regexp.Match("query processing would load too many samples into memory", []byte(err.Error()))
+				if tooManySamples {
+					newBatchDur := time.Duration(batchDur.Nanoseconds() / 2)
+					log.Printf("exportMetric: too many samples in result set. Reducing batch size from %v to %v and trying again.", batchDur, newBatchDur)
+					_, err := cleanFiles(filePrefix, fileNum)
+					fileNum = 0
+					if err != nil {
+						return errors.New(fmt.Sprintf("failed to clean up stale export files: %s", err))
+					}
+					batchDur = newBatchDur
+					if batchDur.Seconds() <= 1 {
+						return errors.New(fmt.Sprintf("failed to query Prometheus for metric %v - too much data even at minimum batch size", metric))
+					}
+					break
+				} else {
+					return err
+				}
+			}
+
+			if value == nil {
+				return errors.New(fmt.Sprintf("metric %v returned an invalid result set", metric))
+			}
+
+			if value.Type() != model.ValMatrix {
+				return errors.New(fmt.Sprintf("when querying metric %v, expected return value to be of type matrix; got type %v instead", metric, value.Type()))
+			}
+			// model/value.go says: type Matrix []*SampleStream
+			values = append(values, value.(model.Matrix)...)
+
+			if batch%batchesPerFile == 0 {
+				if len(values) > 0 {
+					err = writeFile(&values, filePrefix, fileNum)
+					if err != nil {
+						return errors.New(fmt.Sprintf("batch write failed with: %v", err))
+					}
+					fileNum++
+					values = make([]*model.SampleStream, 0, 0)
+				} else {
+					log.Println("exportMetric: no results for this query, skipping write")
+				}
+			}
+			// If this is the last batch, exit the outer loop
+			if batch == batches {
+				allBatchesFetched = true
+			}
+		}
+	}
+	return writeFile(&values, filePrefix, fileNum)
 }
 
 func main() {
@@ -156,8 +243,8 @@ func main() {
 
 	log.Printf("Starting promdump version %v\n", appVersion)
 
-	if *metric == "" || *out == "" {
-		log.Fatalln("Please specify --metric and --out")
+	if *metric != "" && *out == "" {
+		log.Fatalln("When specifying a custom --metric, output file prefix --out is required.")
 	}
 
 	if *startTime != "" && *endTime != "" && *periodDur != 0 {
@@ -168,7 +255,7 @@ func main() {
 	var err error
 	beginTS, endTS, *periodDur, err = getRangeTimestamps(*startTime, *endTime, *periodDur)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalln("getRangeTimeStamps: ", err)
 	}
 
 	// This check has moved below timestamp calculations because the period may now be a calculated value
@@ -182,86 +269,13 @@ func main() {
 	ctx := context.Background()
 	client, err := api.NewClient(api.Config{Address: *baseURL})
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalln("api.NewClient:", err)
 	}
 	promApi := v1.NewAPI(client)
 
-	allBatchesFetched := false
-
-	values := make([]*model.SampleStream, 0, 0)
-	fileNum := uint(0)
-	// There's no way to restart a loop iteration in golang, so apply brute force and ignorance to batch size backoff
-	for allBatchesFetched == false {
-		batches := uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
-		if batches > 99999 {
-			log.Fatal(fmt.Sprintf("batch settings could generate %v batches, which is an unreasonable number of batches", batches))
-		}
-		log.Printf("Will query from %v to %v in %v batches\n", beginTS, endTS, batches)
-		for batch := uint(1); batch <= batches; batch++ {
-			queryTS := beginTS.Add(*batchDur * time.Duration(batch))
-			lookback := batchDur.Seconds()
-			if queryTS.After(endTS) {
-				lookback -= queryTS.Sub(endTS).Seconds()
-				queryTS = endTS
-			}
-
-			query := fmt.Sprintf("%s[%ds]", *metric, int64(lookback))
-			log.Printf("Querying %s at %v", query, queryTS)
-			// TODO: Add support for overriding the timeout; remember it can only go *smaller*
-			value, _, err := promApi.Query(ctx, query, queryTS)
-
-			if err != nil {
-				// This is horrible but the golang prometheus_client swallows the 422 HTTP return code, so we have to
-				// scrape instead :(
-				tooManySamples, _ := regexp.Match("query processing would load too many samples into memory", []byte(err.Error()))
-				if tooManySamples {
-					newBatchDur := time.Duration(batchDur.Nanoseconds() / 2)
-					log.Printf("Too many samples in result set. Reducing batch size from %v to %v and trying again.", batchDur, newBatchDur)
-					_, err := cleanFiles(fileNum)
-					fileNum = 0
-					if err != nil {
-						log.Fatal(fmt.Sprintf("failed to clean up stale export files: %s", err))
-					}
-					*batchDur = newBatchDur
-					if batchDur.Seconds() <= 1 {
-						log.Fatal(errors.New("failed to query Prometheus - too much data even at minimum batch size"))
-					}
-					break
-				} else {
-					log.Fatal(err)
-				}
-			}
-
-			if value == nil {
-				log.Fatal("did not return results")
-			}
-
-			if value.Type() != model.ValMatrix {
-				log.Fatalf("Expected matrix value type; got %v", value.Type())
-			}
-			// model/value.go says: type Matrix []*SampleStream
-			values = append(values, value.(model.Matrix)...)
-
-			if batch%*batchesPerFile == 0 {
-				if len(values) > 0 {
-					err = writeFile(&values, fileNum)
-					if err != nil {
-						log.Fatalf("batch write failed with: %v", err)
-					}
-					fileNum++
-					values = make([]*model.SampleStream, 0, 0)
-				} else {
-					log.Println("No results for this query, skipping write.")
-				}
-			}
-			// If this is the last batch, exit the outer loop
-			if batch == batches {
-				allBatchesFetched = true
-			}
-		}
-	}
-	err = writeFile(&values, fileNum)
+	// TODO: Loop through metrics list for multi-metric support
+	err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
 	if err != nil {
-		log.Fatalf("batch write failed with: %v", err)
+		log.Fatalln("exportMetric:", err)
 	}
 }
