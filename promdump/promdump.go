@@ -17,7 +17,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
@@ -54,6 +56,7 @@ var (
 		"node":    {exportName: "node_export", collect: true, isDefault: true},
 		"tserver": {exportName: "tserver_export", collect: true, isDefault: true},
 		// nb: cql_export is not a typo
+		// TODO: Maybe add a "cql" alias but if we do that, we need to squash duplicates
 		"ycql": {exportName: "cql_export", collect: true, isDefault: true},
 		"ysql": {exportName: "ysql_export", collect: true, isDefault: true},
 	}
@@ -73,6 +76,33 @@ func init() {
 			v.isDefault = false
 			return err
 		})
+	}
+}
+
+func logMetricCollectorConfig() {
+	// Logs the collector config (
+	var collect []string
+	var skip []string
+	for _, v := range collectMetrics {
+		if *out != "" && *out == v.exportName {
+			log.Fatalln(fmt.Sprintf("The output file prefix '%v' is reserved. Specify a different --out value.", v.exportName))
+		}
+		if v.collect {
+			collect = append(collect, v.exportName)
+		} else {
+			skip = append(skip, v.exportName)
+		}
+	}
+	if len(collect) > 0 {
+		sort.Strings(collect)
+		log.Printf("main: collecting the following Yugabyte metrics: %v", strings.Join(collect, ", "))
+	}
+	if len(skip) > 0 {
+		sort.Strings(skip)
+		log.Printf("main: skipping the following Yugabyte metrics: %v", strings.Join(skip, ", "))
+	}
+	if *metric != "" {
+		log.Printf("main: collecting the following custom metric: '%v'", *metric)
 	}
 }
 
@@ -177,15 +207,6 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 }
 
 func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration, batchesPerFile uint, filePrefix string) error {
-	matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", filePrefix))
-	if err != nil {
-		return err
-	}
-	if len(matches) > 0 {
-		// No error = file already exists
-		return errors.New(fmt.Sprintf("found %v existing export files with file prefix %v; move any existing export files aside before proceeding", len(matches), filePrefix))
-	}
-
 	allBatchesFetched := false
 
 	values := make([]*model.SampleStream, 0, 0)
@@ -271,10 +292,6 @@ func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.T
 
 func main() {
 	flag.Parse()
-	// TODO: Remove debug code or put it behind a debug flag
-	for k, v := range collectMetrics {
-		log.Printf("main: dump of YB metrics collector config %v after initial flag parse: %+v", k, *v)
-	}
 
 	if *version {
 		fmt.Printf("promdump version %v\n", appVersion)
@@ -300,16 +317,11 @@ func main() {
 		}
 	}
 
-	// TODO: Remove debug code or put it behind a debug flag
-	for k, v := range collectMetrics {
-		log.Printf("main: dump of YB metrics collector config %v after checking for custom --metric specification: %+v", k, *v)
-	}
-
 	if *metric != "" && *out == "" {
 		log.Fatalln("When specifying a custom --metric, output file prefix --out is required.")
 	}
 
-	// TODO: Throw an error if --out is a reserved exportName. Let people do this if all the YB metrics are disabled?
+	logMetricCollectorConfig()
 
 	if *startTime != "" && *endTime != "" && *periodDur != 0 {
 		log.Fatalln("Too many time arguments. Specify either --start_time and --end_time or a time and --period.")
@@ -337,20 +349,51 @@ func main() {
 	}
 	promApi := v1.NewAPI(client)
 
-	// TODO: Check for existing export files for all file prefixes up front
+	// TODO: DRY this out
+	var fileConflictPrefixes []string
+	if *nodePrefix != "" {
+		for _, v := range collectMetrics {
+			matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", v.exportName))
+			if err != nil {
+				log.Fatalln(fmt.Sprintf("main: checking for existing export files with file prefix %v failed with error: %v", v.exportName, err))
+			}
+			if len(matches) > 0 {
+				// No error = file already exists
+				fileConflictPrefixes = append(fileConflictPrefixes, v.exportName+".*")
+			}
+		}
+	}
+	if *out != "" {
+		matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", *out))
+		if err != nil {
+			log.Fatalln(fmt.Sprintf("main: checking for existing export files with file prefix %v failed with error: %v", *out, err))
+		}
+		if len(matches) > 0 {
+			// No error = file already exists
+			fileConflictPrefixes = append(fileConflictPrefixes, *out+".*")
+		}
+	}
+	if len(fileConflictPrefixes) > 0 {
+		sort.Strings(fileConflictPrefixes)
+		log.Fatalln(fmt.Sprintf("main: found existing export files with file prefix(es): %v; move any existing export files aside before proceeding", strings.Join(fileConflictPrefixes, " ")))
+	}
+
+	// TODO: DRY this out
 	// Loop through yb metrics list and export each metric according to its configuration
 	for _, v := range collectMetrics {
 		if v.collect {
 			ybMetric := fmt.Sprintf("{export_type=\"%s\",node_prefix=\"%s\"}", v.exportName, *nodePrefix)
 			err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, v.exportName)
 			if err != nil {
-				// TODO: Log the failure and move to the next metric instead
-				log.Fatalln("exportMetric:", err)
+				log.Printf("exportMetric: export of metric %v failed with error %v; moving to next metric", v.exportName, err)
+				continue
 			}
 		}
 	}
-	err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
-	if err != nil {
-		log.Fatalln("exportMetric:", err)
+	if *metric != "" {
+		err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
+		if err != nil {
+			log.Fatalln("exportMetric:", err)
+		}
 	}
 }
