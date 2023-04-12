@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
@@ -28,6 +29,12 @@ const appVersion = "0.1.2"
 const defaultPeriod = 7 * 24 * time.Hour // 7 days
 const defaultBatchDuration = 24 * time.Hour
 
+type promExport struct {
+	exportName string
+	collect    bool
+	isDefault  bool
+}
+
 var (
 	// Also see init() below for aliases
 	version        = flag.Bool("version", false, "prints the promdump version and exits")
@@ -36,14 +43,37 @@ var (
 	endTime        = flag.String("end_time", "", "timestamp to end querying at (RFC3339). Defaults to current time.")
 	periodDur      = flag.Duration("period", 0, "time period to get data for")
 	batchDur       = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
-	metric         = flag.String("metric", "", "metric to fetch (can include label values)")
-	out            = flag.String("out", "", "output file prefix")
+	metric         = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
+	out            = flag.String("out", "", "output file prefix; only used for custom -metric specifications")
+	nodePrefix     = flag.String("node_prefix", "", "node prefix value for Yugabyte Universe, e.g. yb-prod-appname")
 	batchesPerFile = flag.Uint("batches_per_file", 1, "batches per output file")
+
+	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
+	collectMetrics = map[string]*promExport{
+		"master":  {exportName: "master_export", collect: true, isDefault: true},
+		"node":    {exportName: "node_export", collect: true, isDefault: true},
+		"tserver": {exportName: "tserver_export", collect: true, isDefault: true},
+		// nb: cql_export is not a typo
+		"ycql": {exportName: "cql_export", collect: true, isDefault: true},
+		"ysql": {exportName: "ysql_export", collect: true, isDefault: true},
+	}
 )
 
 func init() {
 	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
 	flag.StringVar(endTime, "timestamp", "", "alias for end_time")
+	// Process CLI flags for collection of YB prometheus exports (master, node, tserver, ycql, ysql)
+	for k, v := range collectMetrics {
+		// Needed to break closure
+		k := k
+		v := v
+		flag.Func(k, fmt.Sprintf("collect metrics for %v", v.exportName), func(s string) error {
+			var err error
+			v.collect, err = strconv.ParseBool(s)
+			v.isDefault = false
+			return err
+		})
+	}
 }
 
 // dump a slice of SampleStream messages to a json file.
@@ -168,6 +198,7 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 		}
 		log.Printf("exportMetric: querying from %v to %v in %v batches\n", beginTS, endTS, batches)
 		for batch := uint(1); batch <= batches; batch++ {
+			// TODO: Refactor this into getBatch()?
 			queryTS := beginTS.Add(batchDur * time.Duration(batch))
 			lookback := batchDur.Seconds()
 			if queryTS.After(endTS) {
@@ -233,8 +264,17 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 	return writeFile(&values, filePrefix, fileNum)
 }
 
+func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
+	// TODO: Refactor to use this func or get rid of it
+	return nil, nil
+}
+
 func main() {
 	flag.Parse()
+	// TODO: Remove debug code or put it behind a debug flag
+	for k, v := range collectMetrics {
+		log.Printf("main: dump of YB metrics collector config %v after initial flag parse: %+v", k, *v)
+	}
 
 	if *version {
 		fmt.Printf("promdump version %v\n", appVersion)
@@ -243,9 +283,33 @@ func main() {
 
 	log.Printf("Starting promdump version %v\n", appVersion)
 
+	if *nodePrefix == "" && *metric == "" {
+		log.Fatalln("Specify a --node_prefix value (if collecting default Yugabyte metrics), a custom metric using --metric, or both.")
+	}
+	if *nodePrefix == "" && *metric != "" {
+		// If the user has not provided a node prefix but has provided a metric, flip default yb metrics
+		// collection off.
+		for _, v := range collectMetrics {
+			v := v
+			if v.isDefault {
+				v.collect = false
+			}
+			if *nodePrefix == "" && v.collect == true {
+				log.Fatalln("Specify a --node_prefix value or remove any Yugabyte metric export collection flags (--master, --node, etc.)")
+			}
+		}
+	}
+
+	// TODO: Remove debug code or put it behind a debug flag
+	for k, v := range collectMetrics {
+		log.Printf("main: dump of YB metrics collector config %v after checking for custom --metric specification: %+v", k, *v)
+	}
+
 	if *metric != "" && *out == "" {
 		log.Fatalln("When specifying a custom --metric, output file prefix --out is required.")
 	}
+
+	// TODO: Throw an error if --out is a reserved exportName. Let people do this if all the YB metrics are disabled?
 
 	if *startTime != "" && *endTime != "" && *periodDur != 0 {
 		log.Fatalln("Too many time arguments. Specify either --start_time and --end_time or a time and --period.")
@@ -273,7 +337,18 @@ func main() {
 	}
 	promApi := v1.NewAPI(client)
 
-	// TODO: Loop through metrics list for multi-metric support
+	// TODO: Check for existing export files for all file prefixes up front
+	// Loop through yb metrics list and export each metric according to its configuration
+	for _, v := range collectMetrics {
+		if v.collect {
+			ybMetric := fmt.Sprintf("{export_type=\"%s\",node_prefix=\"%s\"}", v.exportName, *nodePrefix)
+			err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, v.exportName)
+			if err != nil {
+				// TODO: Log the failure and move to the next metric instead
+				log.Fatalln("exportMetric:", err)
+			}
+		}
+	}
 	err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
 	if err != nil {
 		log.Fatalln("exportMetric:", err)
