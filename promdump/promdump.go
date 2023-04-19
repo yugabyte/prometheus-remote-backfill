@@ -11,7 +11,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math"
 	"os"
@@ -122,8 +121,7 @@ func writeFile(values *[]*model.SampleStream, filePrefix string, fileNum uint) e
 		return err
 	}
 	log.Printf("writeFile: writing %v results to file %v", len(*values), filename)
-	// TODO: Fix use of deprecated call
-	return ioutil.WriteFile(filename, valuesJSON, 0644)
+	return os.WriteFile(filename, valuesJSON, 0644)
 }
 
 func cleanFiles(filePrefix string, fileNum uint) (uint, error) {
