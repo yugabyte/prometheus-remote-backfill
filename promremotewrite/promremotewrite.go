@@ -12,9 +12,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -26,7 +26,10 @@ import (
 	"golang.org/x/net/context/ctxhttp"
 )
 
+const appVersion = "0.1.0"
+
 var (
+	version      = flag.Bool("version", false, "prints the promdump version and exits")
 	writeURL     = flag.String("url", "", "URL for remote write endpoint")
 	writeTimeout = flag.Duration("write_timeout", 5*time.Minute, "write timeout")
 	batchSize    = flag.Uint("batch_size", 100000, "number of samples per request")
@@ -36,19 +39,19 @@ var (
 // converts a slice of SampleStream messages into remote write requests and sends them into the channel.
 func generateWriteRequests(streams []*model.SampleStream, requests chan<- *prompb.WriteRequest) {
 	var req = &prompb.WriteRequest{
-		Timeseries: make([]*prompb.TimeSeries, 0, 0),
+		Timeseries: make([]prompb.TimeSeries, 0, 0),
 	}
 	totalSamples := uint(0)
 	for _, s := range streams {
-		samples := make([]*prompb.Sample, 0, len(s.Values))
+		samples := make([]prompb.Sample, 0, len(s.Values))
 		for _, v := range s.Values {
-			samples = append(samples, &prompb.Sample{
+			samples = append(samples, prompb.Sample{
 				Value:     float64(v.Value),
 				Timestamp: int64(v.Timestamp),
 			})
 			totalSamples++
 		}
-		ts := &prompb.TimeSeries{
+		ts := prompb.TimeSeries{
 			Labels:  metricToLabelProtos(s.Metric),
 			Samples: samples,
 		}
@@ -57,7 +60,7 @@ func generateWriteRequests(streams []*model.SampleStream, requests chan<- *promp
 			log.Printf("Sending batch of %d samples", totalSamples)
 			totalSamples = 0
 			requests <- req
-			req = &prompb.WriteRequest{Timeseries: make([]*prompb.TimeSeries, 0, 0)}
+			req = &prompb.WriteRequest{Timeseries: make([]prompb.TimeSeries, 0, 0)}
 		}
 	}
 
@@ -68,10 +71,10 @@ func generateWriteRequests(streams []*model.SampleStream, requests chan<- *promp
 // metricToLabelProtos builds a []*prompb.Label from a model.Metric
 // Copy/pasted from prometheus/storage/remote/codec.go (can't use it directly
 // because of vendoring in prometheus repo, see prometheus/issues/1720).
-func metricToLabelProtos(metric model.Metric) []*prompb.Label {
-	labels := make([]*prompb.Label, 0, len(metric))
+func metricToLabelProtos(metric model.Metric) []prompb.Label {
+	labels := make([]prompb.Label, 0, len(metric))
 	for k, v := range metric {
-		labels = append(labels, &prompb.Label{
+		labels = append(labels, prompb.Label{
 			Name:  string(k),
 			Value: string(v),
 		})
@@ -127,6 +130,13 @@ func write(client *http.Client, req *prompb.WriteRequest) error {
 func main() {
 	flag.Parse()
 
+	if *version {
+		fmt.Printf("promremotewrite version %v\n", appVersion)
+		os.Exit(0)
+	}
+
+	log.Printf("Starting promremotewrite version %v\n", appVersion)
+
 	if *writeURL == "" {
 		log.Fatalln("Please specify --url")
 	}
@@ -154,7 +164,7 @@ func main() {
 
 	for _, fname := range flag.Args() {
 		log.Printf("Processing file %s", fname)
-		contents, err := ioutil.ReadFile(fname)
+		contents, err := os.ReadFile(fname)
 		if err != nil {
 			log.Fatal(err)
 		}
