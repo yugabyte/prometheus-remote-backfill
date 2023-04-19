@@ -85,7 +85,7 @@ func logMetricCollectorConfig() {
 	var skip []string
 	for _, v := range collectMetrics {
 		if *out != "" && *out == v.exportName {
-			log.Fatalln(fmt.Sprintf("The output file prefix '%v' is reserved. Specify a different --out value.", v.exportName))
+			log.Fatalf("The output file prefix '%v' is reserved. Specify a different --out value.", v.exportName)
 		}
 		if v.collect {
 			collect = append(collect, v.exportName)
@@ -355,7 +355,7 @@ func main() {
 		for _, v := range collectMetrics {
 			matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", v.exportName))
 			if err != nil {
-				log.Fatalln(fmt.Sprintf("main: checking for existing export files with file prefix %v failed with error: %v", v.exportName, err))
+				log.Fatalf("main: checking for existing export files with file prefix %v failed with error: %v", v.exportName, err)
 			}
 			if len(matches) > 0 {
 				// No error = file already exists
@@ -366,7 +366,7 @@ func main() {
 	if *out != "" {
 		matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", *out))
 		if err != nil {
-			log.Fatalln(fmt.Sprintf("main: checking for existing export files with file prefix %v failed with error: %v", *out, err))
+			log.Fatalf("main: checking for existing export files with file prefix %v failed with error: %v", *out, err)
 		}
 		if len(matches) > 0 {
 			// No error = file already exists
@@ -375,7 +375,7 @@ func main() {
 	}
 	if len(fileConflictPrefixes) > 0 {
 		sort.Strings(fileConflictPrefixes)
-		log.Fatalln(fmt.Sprintf("main: found existing export files with file prefix(es): %v; move any existing export files aside before proceeding", strings.Join(fileConflictPrefixes, " ")))
+		log.Fatalf("main: found existing export files with file prefix(es): %v; move any existing export files aside before proceeding", strings.Join(fileConflictPrefixes, " "))
 	}
 
 	// TODO: DRY this out
