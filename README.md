@@ -43,7 +43,7 @@ concurrent API requests:
 ## Compile
 
 ```
-docker run --rm -v "$PWD/promdump":/promdump -w /promdump golang:1.17 go build
+docker run --rm -v "$PWD/promdump":/promdump -w /promdump golang:1.19 go build
 docker run --rm -v "$PWD/promremotewrite":/promremotewrite -w /promremotewrite golang:1.12 go build
 ```
 

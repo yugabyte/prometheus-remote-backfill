@@ -27,7 +27,7 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-const appVersion = "0.1.2"
+const appVersion = "0.1.3"
 const defaultPeriod = 7 * 24 * time.Hour // 7 days
 const defaultBatchDuration = 24 * time.Hour
 
@@ -41,8 +41,8 @@ var (
 	// Also see init() below for aliases
 	version        = flag.Bool("version", false, "prints the promdump version and exits")
 	baseURL        = flag.String("url", "http://localhost:9090", "URL for Prometheus server API")
-	startTime      = flag.String("start_time", "", "timestamp to start querying at (RFC3339, e.g. 2023-03-13T01:00:00-0100).")
-	endTime        = flag.String("end_time", "", "timestamp to end querying at (RFC3339). Defaults to current time.")
+	startTime      = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
+	endTime        = flag.String("end_time", "", "RFC3339 `timestamp` to end querying at (default now)")
 	periodDur      = flag.Duration("period", 0, "time period to get data for")
 	batchDur       = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
 	metric         = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
@@ -64,13 +64,14 @@ var (
 
 func init() {
 	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
-	flag.StringVar(endTime, "timestamp", "", "alias for end_time")
+	flag.StringVar(endTime, "timestamp", "", "alias for end_time (`timestamp`)")
 	// Process CLI flags for collection of YB prometheus exports (master, node, tserver, ycql, ysql)
 	for k, v := range collectMetrics {
 		// Needed to break closure
 		k := k
 		v := v
-		flag.Func(k, fmt.Sprintf("collect metrics for %v", v.exportName), func(s string) error {
+		// Backticks set the type string for flags in --help output
+		flag.Func(k, fmt.Sprintf("``collect metrics for %v (default %v)", v.exportName, v.collect), func(s string) error {
 			var err error
 			v.collect, err = strconv.ParseBool(s)
 			v.isDefault = false
@@ -121,6 +122,7 @@ func writeFile(values *[]*model.SampleStream, filePrefix string, fileNum uint) e
 		return err
 	}
 	log.Printf("writeFile: writing %v results to file %v", len(*values), filename)
+	// TODO: Fix use of deprecated call
 	return ioutil.WriteFile(filename, valuesJSON, 0644)
 }
 
@@ -299,6 +301,10 @@ func main() {
 	}
 
 	log.Printf("Starting promdump version %v\n", appVersion)
+
+	if flag.NArg() > 0 {
+		log.Fatalf("Too many arguments: %v. Check for typos.", strings.Join(flag.Args(), " "))
+	}
 
 	if *nodePrefix == "" && *metric == "" {
 		log.Fatalln("Specify a --node_prefix value (if collecting default Yugabyte metrics), a custom metric using --metric, or both.")
