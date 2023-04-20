@@ -38,6 +38,7 @@ type promExport struct {
 
 var (
 	// Also see init() below for aliases
+	debugLogging   = flag.Bool("debug", false, "enable additional debug logging")
 	version        = flag.Bool("version", false, "prints the promdump version and exits")
 	baseURL        = flag.String("url", "http://localhost:9090", "URL for Prometheus server API")
 	startTime      = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
@@ -80,7 +81,7 @@ func init() {
 }
 
 func logMetricCollectorConfig() {
-	// Logs the collector config (
+	// Logs the collector config
 	var collect []string
 	var skip []string
 	for _, v := range collectMetrics {
@@ -200,14 +201,29 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 
 	// Don't query past the current time because that would be dumb
 	if endTS.After(time.Now()) {
-		endTS = time.Now()
+		curTS := time.Now()
+		log.Printf("getRangeTimestamps: end time %v is after current time %v; setting end time to %v and recalculating period", endTS.Format(time.RFC3339), curTS.Format(time.RFC3339), curTS.Format(time.RFC3339))
+		endTS = curTS
+		/*
+		   Recalculate the period and round to the nearest second.
+
+		   We may lose a single sample here by not rounding up but I'm not doing a bunch of annoying type conversions
+		   for a 1/15 chance to lose one sample that we probably don't care about anyway.
+		*/
+		period = endTS.Sub(startTS).Round(time.Second)
 	}
 
+	if *debugLogging {
+		log.Printf("getRangeTimestamps: returning start time %v, end time %v, and period %v", startTS.Format(time.RFC3339), endTS.Format(time.RFC3339), period)
+	}
 	return startTS, endTS, period, nil
 }
 
 func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration, batchesPerFile uint, filePrefix string) error {
 	allBatchesFetched := false
+	if *debugLogging {
+		log.Printf("exportMetric: received start time %v, end time %v, and period %v", beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), periodDur)
+	}
 
 	values := make([]*model.SampleStream, 0, 0)
 	fileNum := uint(0)
@@ -217,7 +233,7 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 		if batches > 99999 {
 			return errors.New(fmt.Sprintf("batch settings could generate %v batches, which is an unreasonable number of batches", batches))
 		}
-		log.Printf("exportMetric: querying from %v to %v in %v batches\n", beginTS, endTS, batches)
+		log.Printf("exportMetric: querying metric '%v' from %v to %v in %v batches\n", metric, beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), batches)
 		for batch := uint(1); batch <= batches; batch++ {
 			// TODO: Refactor this into getBatch()?
 			queryTS := beginTS.Add(batchDur * time.Duration(batch))
@@ -228,7 +244,10 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 			}
 
 			query := fmt.Sprintf("%s[%ds]", metric, int64(lookback))
-			log.Printf("exportMetric: querying %s ending at timestamp %v", query, queryTS.Format(time.RFC3339))
+			// Very chatty - make this a debug message?
+			//if *debugLogging {
+			log.Printf("exportMetric: executing query '%s' ending at timestamp %v", query, queryTS.Format(time.RFC3339))
+			//}
 			// TODO: Add support for overriding the timeout; remember it can only go *smaller*
 			value, _, err := promApi.Query(ctx, query, queryTS)
 
@@ -288,6 +307,14 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
 	// TODO: Refactor to use this func or get rid of it
 	return nil, nil
+}
+
+func hasConflictingFiles(filename string) (bool, error) {
+	matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", filename))
+	if err != nil {
+		return true, err
+	}
+	return len(matches) > 0, nil
 }
 
 func main() {
@@ -353,33 +380,30 @@ func main() {
 	}
 	promApi := v1.NewAPI(client)
 
-	// TODO: DRY this out
-	var fileConflictPrefixes []string
+	checkPrefixes := []string{}
+	conflictPrefixes := []string{}
+
+	if *out != "" {
+		checkPrefixes = append(checkPrefixes, *out)
+	}
 	if *nodePrefix != "" {
 		for _, v := range collectMetrics {
-			matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", v.exportName))
-			if err != nil {
-				log.Fatalf("main: checking for existing export files with file prefix %v failed with error: %v", v.exportName, err)
-			}
-			if len(matches) > 0 {
-				// No error = file already exists
-				fileConflictPrefixes = append(fileConflictPrefixes, v.exportName+".*")
-			}
+			checkPrefixes = append(checkPrefixes, v.exportName)
 		}
 	}
-	if *out != "" {
-		matches, err := filepath.Glob(fmt.Sprintf("%s.[0-9][0-9][0-9][0-9][0-9]", *out))
+
+	for _, prefix := range checkPrefixes {
+		conflict, err := hasConflictingFiles(prefix)
 		if err != nil {
-			log.Fatalf("main: checking for existing export files with file prefix %v failed with error: %v", *out, err)
+			log.Fatalf("main: checking for existing export files with file prefix %v failed with error: %v", prefix, err)
 		}
-		if len(matches) > 0 {
-			// No error = file already exists
-			fileConflictPrefixes = append(fileConflictPrefixes, *out+".*")
+		if conflict {
+			conflictPrefixes = append(conflictPrefixes, prefix+".*")
 		}
 	}
-	if len(fileConflictPrefixes) > 0 {
-		sort.Strings(fileConflictPrefixes)
-		log.Fatalf("main: found existing export files with file prefix(es): %v; move any existing export files aside before proceeding", strings.Join(fileConflictPrefixes, " "))
+	if len(conflictPrefixes) > 0 {
+		sort.Strings(conflictPrefixes)
+		log.Fatalf("main: found existing export files with file prefix(es): %v; move any existing export files aside before proceeding", strings.Join(conflictPrefixes, " "))
 	}
 
 	// TODO: DRY this out
