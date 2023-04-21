@@ -43,8 +43,8 @@ concurrent API requests:
 ## Compile
 
 ```
-docker run --rm -v "$PWD/promdump":/promdump -w /promdump golang:1.19 go build
-docker run --rm -v "$PWD/promremotewrite":/promremotewrite -w /promremotewrite golang:1.19 go build
+docker run --rm -v "$PWD/promdump":/promdump -w /promdump golang:1.19 go build -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'"
+docker run --rm -v "$PWD/promremotewrite":/promremotewrite -w /promremotewrite golang:1.19 go build -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'"
 ```
 
 ## License
