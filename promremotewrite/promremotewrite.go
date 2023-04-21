@@ -26,8 +26,6 @@ import (
 	"golang.org/x/net/context/ctxhttp"
 )
 
-const appVersion = "0.1.1"
-
 var (
 	version      = flag.Bool("version", false, "prints the promdump version and exits")
 	writeURL     = flag.String("url", "", "URL for remote write endpoint")
@@ -35,6 +33,7 @@ var (
 	batchSize    = flag.Uint("batch_size", 100000, "number of samples per request")
 	concurrency  = flag.Uint("concurrency", 1, "number of influxdb writers")
 
+	AppVersion = "DEV BUILD"
 	CommitHash = "POPULATED_BY_BUILD"
 	BuildTime  = "POPULATED_BY_BUILD"
 )
@@ -133,12 +132,14 @@ func write(client *http.Client, req *prompb.WriteRequest) error {
 func main() {
 	flag.Parse()
 
+	verString := fmt.Sprintf("promremotewrite version %v from commit %v built %v\n", AppVersion, CommitHash, BuildTime)
+
 	if *version {
-		fmt.Printf("promremotewrite version %v\n", appVersion)
+		fmt.Printf(verString)
 		os.Exit(0)
 	}
 
-	log.Printf("Starting promremotewrite version %v\n", appVersion)
+	log.Printf(verString)
 
 	if *writeURL == "" {
 		log.Fatalln("Please specify --url")

@@ -1,11 +1,12 @@
 # This workflow will build a golang project
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
 
-name: Go
+name: Tagged Release
 
 on:
   push:
-    branches: [ "master" ]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 
 jobs:
 
@@ -21,9 +22,10 @@ jobs:
 
     - name: Build promdump
       working-directory: ./promdump
+      # github.ref_name is the tag or branch name
       run: |
         go get
-        go build -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
+        go build -ldflags=" -X 'main.AppVersion=${{ github.ref_name }}' -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
 
     - name: Test promdump
       working-directory: ./promdump
@@ -31,9 +33,10 @@ jobs:
 
     - name: Build promremotewrite
       working-directory: ./promremotewrite
+      # github.ref_name is the tag or branch name
       run: |
         go get
-        go build -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
+        go build -ldflags=" -X 'main.AppVersion=${{ github.ref_name }}' -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
 
     - name: Test promremotewrite
       working-directory: ./promremotewrite

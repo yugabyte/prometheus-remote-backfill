@@ -26,7 +26,6 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-const appVersion = "0.1.4"
 const defaultPeriod = 7 * 24 * time.Hour // 7 days
 const defaultBatchDuration = 24 * time.Hour
 
@@ -61,6 +60,7 @@ var (
 		"ysql": {exportName: "ysql_export", collect: true, isDefault: true},
 	}
 
+	AppVersion = "DEV BUILD"
 	CommitHash = "POPULATED_BY_BUILD"
 	BuildTime  = "POPULATED_BY_BUILD"
 )
@@ -323,12 +323,14 @@ func hasConflictingFiles(filename string) (bool, error) {
 func main() {
 	flag.Parse()
 
+	verString := fmt.Sprintf("promdump version %v from commit %v built %v\n", AppVersion, CommitHash, BuildTime)
+
 	if *version {
-		fmt.Printf("promdump version %v from commit %v built %v\n", appVersion, CommitHash, BuildTime)
+		fmt.Printf(verString)
 		os.Exit(0)
 	}
 
-	log.Printf("Starting promdump version %v\n", appVersion)
+	log.Printf(verString)
 
 	if flag.NArg() > 0 {
 		log.Fatalf("Too many arguments: %v. Check for typos.", strings.Join(flag.Args(), " "))
