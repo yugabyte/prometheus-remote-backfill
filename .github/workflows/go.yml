@@ -23,7 +23,7 @@ jobs:
       working-directory: ./promdump
       run: |
         go get
-        go build -v ./...
+        go build -ldflags=" -X 'github.com/knyar/prometheus-remote-backfill/promdump/main.Version=$$(git rev-parse HEAD)' -X 'github.com/knyar/prometheus-remote-backfill/promdump/main.BuildTime=$$(date -Iseconds)'" -v ./...
 
     - name: Test promdump
       working-directory: ./promdump
@@ -33,7 +33,7 @@ jobs:
       working-directory: ./promremotewrite
       run: |
         go get
-        go build -v ./...
+        go build -ldflags=" -X 'github.com/knyar/prometheus-remote-backfill/promremotewrite/main.Version=$$(git rev-parse HEAD)' -X 'github.com/knyar/prometheus-remote-backfill/promremotewrite/main.BuildTime=$$(date -Iseconds)'" -v ./...
 
     - name: Test promremotewrite
       working-directory: ./promremotewrite

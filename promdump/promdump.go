@@ -26,7 +26,7 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-const appVersion = "0.1.3"
+const appVersion = "0.1.4"
 const defaultPeriod = 7 * 24 * time.Hour // 7 days
 const defaultBatchDuration = 24 * time.Hour
 
@@ -60,6 +60,9 @@ var (
 		"ycql": {exportName: "cql_export", collect: true, isDefault: true},
 		"ysql": {exportName: "ysql_export", collect: true, isDefault: true},
 	}
+
+	CommitHash = "POPULATED_BY_BUILD"
+	BuildTime  = "POPULATED_BY_BUILD"
 )
 
 func init() {
@@ -321,7 +324,7 @@ func main() {
 	flag.Parse()
 
 	if *version {
-		fmt.Printf("promdump version %v\n", appVersion)
+		fmt.Printf("promdump version %v from commit %v built %v\n", appVersion, CommitHash, BuildTime)
 		os.Exit(0)
 	}
 

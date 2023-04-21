@@ -26,7 +26,7 @@ import (
 	"golang.org/x/net/context/ctxhttp"
 )
 
-const appVersion = "0.1.0"
+const appVersion = "0.1.1"
 
 var (
 	version      = flag.Bool("version", false, "prints the promdump version and exits")
@@ -34,6 +34,9 @@ var (
 	writeTimeout = flag.Duration("write_timeout", 5*time.Minute, "write timeout")
 	batchSize    = flag.Uint("batch_size", 100000, "number of samples per request")
 	concurrency  = flag.Uint("concurrency", 1, "number of influxdb writers")
+
+	CommitHash = "POPULATED_BY_BUILD"
+	BuildTime  = "POPULATED_BY_BUILD"
 )
 
 // converts a slice of SampleStream messages into remote write requests and sends them into the channel.
