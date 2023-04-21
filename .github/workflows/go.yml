@@ -40,3 +40,16 @@ jobs:
     - name: Test promremotewrite
       working-directory: ./promremotewrite
       run: go test -v ./...
+
+    - name: Compress artifacts
+      run: |
+        gzip promdump/promdump
+        gzip promremotewrite/promremotewrite
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: compressed-binaries
+        path: |
+          promdump/promdump.gz
+          promremotewrite/promremotewrite.gz
