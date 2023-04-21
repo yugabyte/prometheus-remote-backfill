@@ -46,10 +46,14 @@ jobs:
         gzip promdump/promdump
         gzip promremotewrite/promremotewrite
 
-    - name: Upload artifacts
+    - name: Upload promdump
       uses: actions/upload-artifact@v3
       with:
-        name: compressed-binaries
-        path: |
-          promdump/promdump.gz
-          promremotewrite/promremotewrite.gz
+        name: promdump
+        path: promdump/promdump.gz
+        
+    - name: Upload promremotewrite
+      uses: actions/upload-artifact@v3
+      with:
+        name: promremotewrite
+        path: promremotewrite/promremotewrite.gz
