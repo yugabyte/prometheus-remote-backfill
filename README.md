@@ -27,7 +27,7 @@ series per metric name), you might need to decrease `-batch` even further.
 ## Example
 
 Dump all data of `node_filesystem_free` metric for the last year, issuing a
-separate query for each 12hrs of data, storing 24hrs worth of data in a each
+separate query for each 12hrs of data, storing 24hrs worth of data in each
 file:
 
     promdump -url=http://localhost:9090 \
