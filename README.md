@@ -27,7 +27,7 @@ series per metric name), you might need to decrease `-batch` even further.
 ## Example
 
 Dump all data of `node_filesystem_free` metric for the last year, issuing a
-separate query for each 12hrs of data, storing 24hrs worth of data in a each
+separate query for each 12hrs of data, storing 24hrs worth of data in each
 file:
 
     promdump -url=http://localhost:9090 \
@@ -43,8 +43,16 @@ concurrent API requests:
 ## Compile
 
 ```
-docker run --rm -v "$PWD/promdump":/promdump -w /promdump golang:1.19 go build
-docker run --rm -v "$PWD/promremotewrite":/promremotewrite -w /promremotewrite golang:1.19 go build
+docker run --rm \
+  -v "$PWD/promdump":/promdump \
+  -w /promdump golang:1.19 \
+  go build \
+  -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'"
+docker run --rm \
+  -v "$PWD/promremotewrite":/promremotewrite \
+  -w /promremotewrite golang:1.19 \
+  go build \
+  -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'"
 ```
 
 ## License
