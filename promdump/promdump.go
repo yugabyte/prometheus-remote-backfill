@@ -82,7 +82,7 @@ func init() {
 
 		metricName, err := getMetricName(v)
 		if err != nil {
-			log.Fatalf("main: %v", err)
+			log.Fatalf("init: %v", err)
 		}
 
 		// Backticks set the type string for flags in --help output
@@ -96,7 +96,6 @@ func init() {
 }
 
 func getMetricName(metric *promExport) (string, error) {
-
 	if metric.exportName != "" && metric.jobName != "" {
 		return "", errors.New("getMetricName: exportName and jobName are mutually exclusive!  Both detected!")
 	}
@@ -106,9 +105,7 @@ func getMetricName(metric *promExport) (string, error) {
 	} else if metric.jobName != "" {
 		return metric.jobName, nil
 	}
-
 	return "", errors.New("getMetricName: no metric name determined!")
-
 }
 
 
@@ -119,9 +116,8 @@ func logMetricCollectorConfig() {
 	for _, v := range collectMetrics {
 
 		metricName, err := getMetricName(v)
-
 		if err != nil {
-			log.Fatalf("main: %v", err)
+			log.Fatalf("logMetricCollectorConfig: %v", err)
 		}
 
 		if *out != "" && *out == metricName {
@@ -430,11 +426,9 @@ func main() {
 	if *nodePrefix != "" {
 		for _, v := range collectMetrics {
 			metricName, err := getMetricName(v)
-
 			if err != nil {
 				log.Fatalf("main: %v", err)
 			}
-
 			checkPrefixes = append(checkPrefixes, metricName)
 		}
 	}
@@ -458,7 +452,6 @@ func main() {
 	for _, v := range collectMetrics {
 		if v.collect {
 			metricName, err := getMetricName(v)
-
 			if err != nil {
 				log.Fatalf("main: %v", err)
 			}
