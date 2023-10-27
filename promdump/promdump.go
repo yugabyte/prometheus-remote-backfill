@@ -31,6 +31,7 @@ const defaultBatchDuration = 24 * time.Hour
 
 type promExport struct {
 	exportName string
+	jobName    string
 	collect    bool
 	isDefault  bool
 }
@@ -51,13 +52,18 @@ var (
 
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
 	collectMetrics = map[string]*promExport{
-		"master":  {exportName: "master_export", collect: true, isDefault: true},
-		"node":    {exportName: "node_export", collect: true, isDefault: true},
+		// collect: collect this by default (true/false)
+		// isDefault: this flag has NOT been overridden (placeholder set at runtime - leave true)
+		"master":   {exportName: "master_export", collect: true, isDefault: true},
+		"node":     {exportName: "node_export", collect: true, isDefault: true},
+		"platform": {jobName: "platform", collect: true, isDefault: true},
+		"prometheus": {jobName: "prometheus", collect: false, isDefault: true},
 		"tserver": {exportName: "tserver_export", collect: true, isDefault: true},
 		// nb: cql_export is not a typo
 		// TODO: Maybe add a "cql" alias but if we do that, we need to squash duplicates
 		"ycql": {exportName: "cql_export", collect: true, isDefault: true},
 		"ysql": {exportName: "ysql_export", collect: true, isDefault: true},
+
 	}
 
 	AppVersion = "DEV BUILD"
@@ -73,8 +79,14 @@ func init() {
 		// Needed to break closure
 		k := k
 		v := v
+
+		metricName, err := getMetricName(v)
+		if err != nil {
+			log.Fatalf("main: %v", err)
+		}
+
 		// Backticks set the type string for flags in --help output
-		flag.Func(k, fmt.Sprintf("``collect metrics for %v (default %v)", v.exportName, v.collect), func(s string) error {
+		flag.Func(k, fmt.Sprintf("``collect metrics for %v (default %v)", metricName, v.collect), func(s string) error {
 			var err error
 			v.collect, err = strconv.ParseBool(s)
 			v.isDefault = false
@@ -83,18 +95,42 @@ func init() {
 	}
 }
 
+func getMetricName(metric *promExport) (string, error) {
+
+	if metric.exportName != "" && metric.jobName != "" {
+		return "", errors.New("getMetricName: exportName and jobName are mutually exclusive!  Both detected!")
+	}
+
+	if  metric.exportName != "" {
+		return metric.exportName, nil
+	} else if metric.jobName != "" {
+		return metric.jobName, nil
+	}
+
+	return "", errors.New("getMetricName: no metric name determined!")
+
+}
+
+
 func logMetricCollectorConfig() {
 	// Logs the collector config
 	var collect []string
 	var skip []string
 	for _, v := range collectMetrics {
-		if *out != "" && *out == v.exportName {
-			log.Fatalf("The output file prefix '%v' is reserved. Specify a different --out value.", v.exportName)
+
+		metricName, err := getMetricName(v)
+
+		if err != nil {
+			log.Fatalf("main: %v", err)
+		}
+
+		if *out != "" && *out == metricName {
+			log.Fatalf("The output file prefix '%v' is reserved. Specify a different --out value.", metricName)
 		}
 		if v.collect {
-			collect = append(collect, v.exportName)
+			collect = append(collect, metricName)
 		} else {
-			skip = append(skip, v.exportName)
+			skip = append(skip, metricName)
 		}
 	}
 	if len(collect) > 0 {
@@ -393,7 +429,13 @@ func main() {
 	}
 	if *nodePrefix != "" {
 		for _, v := range collectMetrics {
-			checkPrefixes = append(checkPrefixes, v.exportName)
+			metricName, err := getMetricName(v)
+
+			if err != nil {
+				log.Fatalf("main: %v", err)
+			}
+
+			checkPrefixes = append(checkPrefixes, metricName)
 		}
 	}
 
@@ -415,10 +457,24 @@ func main() {
 	// Loop through yb metrics list and export each metric according to its configuration
 	for _, v := range collectMetrics {
 		if v.collect {
-			ybMetric := fmt.Sprintf("{export_type=\"%s\",node_prefix=\"%s\"}", v.exportName, *nodePrefix)
-			err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, v.exportName)
+			metricName, err := getMetricName(v)
+
 			if err != nil {
-				log.Printf("exportMetric: export of metric %v failed with error %v; moving to next metric", v.exportName, err)
+				log.Fatalf("main: %v", err)
+			}
+
+			var ybMetric string
+
+			if  v.exportName != "" {
+				ybMetric = fmt.Sprintf("{export_type=\"%s\",node_prefix=\"%s\"}", metricName, *nodePrefix)
+			} else if v.jobName != "" {
+				ybMetric = fmt.Sprintf("{job=\"%s\"}", metricName)
+			}
+
+			err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, metricName)
+
+			if err != nil {
+				log.Printf("exportMetric: export of metric %v failed with error %v; moving to next metric", metricName, err)
 				continue
 			}
 		}
