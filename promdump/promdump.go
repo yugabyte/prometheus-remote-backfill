@@ -16,9 +16,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
@@ -54,16 +56,15 @@ var (
 	collectMetrics = map[string]*promExport{
 		// collect: collect this by default (true/false)
 		// isDefault: this flag has NOT been overridden (placeholder set at runtime - leave true)
-		"master":   {exportName: "master_export", collect: true, isDefault: true},
-		"node":     {exportName: "node_export", collect: true, isDefault: true},
-		"platform": {jobName: "platform", collect: true, isDefault: true},
+		"master":     {exportName: "master_export", collect: true, isDefault: true},
+		"node":       {exportName: "node_export", collect: true, isDefault: true},
+		"platform":   {jobName: "platform", collect: true, isDefault: true},
 		"prometheus": {jobName: "prometheus", collect: false, isDefault: true},
-		"tserver": {exportName: "tserver_export", collect: true, isDefault: true},
+		"tserver":    {exportName: "tserver_export", collect: true, isDefault: true},
 		// nb: cql_export is not a typo
 		// TODO: Maybe add a "cql" alias but if we do that, we need to squash duplicates
 		"ycql": {exportName: "cql_export", collect: true, isDefault: true},
 		"ysql": {exportName: "ysql_export", collect: true, isDefault: true},
-
 	}
 
 	AppVersion = "DEV BUILD"
@@ -97,17 +98,16 @@ func init() {
 
 func getMetricName(metric *promExport) (string, error) {
 	if metric.exportName != "" && metric.jobName != "" {
-		return "", errors.New("getMetricName: exportName and jobName are mutually exclusive!  Both detected!")
+		return "", errors.New("getMetricName: exportName and jobName are mutually exclusive")
 	}
 
-	if  metric.exportName != "" {
+	if metric.exportName != "" {
 		return metric.exportName, nil
 	} else if metric.jobName != "" {
 		return metric.jobName, nil
 	}
-	return "", errors.New("getMetricName: no metric name determined!")
+	return "", errors.New("getMetricName: no metric name fields found, unable to determine metric name")
 }
-
 
 func logMetricCollectorConfig() {
 	// Logs the collector config
@@ -254,6 +254,26 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 	return startTS, endTS, period, nil
 }
 
+func writeErrIsFatal(err error) bool {
+	// Handle fatal golang "portable" errors
+	if errors.Is(err, os.ErrPermission) {
+		// Permission denied errors
+		return true
+	} else if errors.Is(err, os.ErrExist) || errors.Is(err, os.ErrNotExist) {
+		// Errors if a file unexpectedly exists or doesn't exist
+		return true
+	}
+
+	// Handle fatal OS-specific errors
+	// nb: Checking ENOSPC may not work Windows but should work on all other supported OSes
+	if runtime.GOOS != "windows" && errors.Is(err, syscall.ENOSPC) {
+		// Out of disk space
+		return true
+	}
+
+	return false
+}
+
 func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration, batchesPerFile uint, filePrefix string) error {
 	allBatchesFetched := false
 	if *debugLogging {
@@ -266,7 +286,7 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 	for allBatchesFetched == false {
 		batches := uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
 		if batches > 99999 {
-			return errors.New(fmt.Sprintf("batch settings could generate %v batches, which is an unreasonable number of batches", batches))
+			return fmt.Errorf("batch settings could generate %v batches, which is an unreasonable number of batches", batches)
 		}
 		log.Printf("exportMetric: querying metric '%v' from %v to %v in %v batches\n", metric, beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), batches)
 		for batch := uint(1); batch <= batches; batch++ {
@@ -296,11 +316,11 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 					_, err := cleanFiles(filePrefix, fileNum)
 					fileNum = 0
 					if err != nil {
-						return errors.New(fmt.Sprintf("failed to clean up stale export files: %s", err))
+						return fmt.Errorf("failed to clean up stale export files: %w", err)
 					}
 					batchDur = newBatchDur
 					if batchDur.Seconds() <= 1 {
-						return errors.New(fmt.Sprintf("failed to query Prometheus for metric %v - too much data even at minimum batch size", metric))
+						return fmt.Errorf("failed to query Prometheus for metric %v - too much data even at minimum batch size", metric)
 					}
 					break
 				} else {
@@ -309,11 +329,11 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 			}
 
 			if value == nil {
-				return errors.New(fmt.Sprintf("metric %v returned an invalid result set", metric))
+				return fmt.Errorf("metric %v returned an invalid result set", metric)
 			}
 
 			if value.Type() != model.ValMatrix {
-				return errors.New(fmt.Sprintf("when querying metric %v, expected return value to be of type matrix; got type %v instead", metric, value.Type()))
+				return fmt.Errorf("when querying metric %v, expected return value to be of type matrix; got type %v instead", metric, value.Type())
 			}
 			// model/value.go says: type Matrix []*SampleStream
 			values = append(values, value.(model.Matrix)...)
@@ -322,7 +342,11 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 				if len(values) > 0 {
 					err = writeFile(&values, filePrefix, fileNum)
 					if err != nil {
-						return errors.New(fmt.Sprintf("batch write failed with: %v", err))
+						batchErr := fmt.Errorf("batch write failed with '%w'", err)
+						if writeErrIsFatal(batchErr) {
+							log.Fatalf("exportMetric: %v, giving up", batchErr)
+						}
+						return batchErr
 					}
 					fileNum++
 					values = make([]*model.SampleStream, 0, 0)
@@ -417,8 +441,8 @@ func main() {
 	}
 	promApi := v1.NewAPI(client)
 
-	checkPrefixes := []string{}
-	conflictPrefixes := []string{}
+	checkPrefixes := make([]string, 0, len(collectMetrics))
+	conflictPrefixes := make([]string, 0, len(collectMetrics))
 
 	if *out != "" {
 		checkPrefixes = append(checkPrefixes, *out)
@@ -458,7 +482,7 @@ func main() {
 
 			var ybMetric string
 
-			if  v.exportName != "" {
+			if v.exportName != "" {
 				ybMetric = fmt.Sprintf("{export_type=\"%s\",node_prefix=\"%s\"}", metricName, *nodePrefix)
 			} else if v.jobName != "" {
 				ybMetric = fmt.Sprintf("{job=\"%s\"}", metricName)
