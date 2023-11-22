@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -48,8 +49,10 @@ var (
 	periodDur      = flag.Duration("period", 0, "time period to get data for")
 	batchDur       = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
 	metric         = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
-	out            = flag.String("out", "", "output file prefix; only used for custom -metric specifications")
+	out            = flag.String("out", "", "output file prefix; only used for custom --metric specifications")
 	nodePrefix     = flag.String("node_prefix", "", "node prefix value for Yugabyte Universe, e.g. yb-prod-appname")
+	instanceList   = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
+	nodeSet        = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
 	batchesPerFile = flag.Uint("batches_per_file", 1, "batches per output file")
 
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
@@ -156,7 +159,9 @@ func writeFile(values *[]*model.SampleStream, filePrefix string, fileNum uint) e
 	if err != nil {
 		return err
 	}
-	log.Printf("writeFile: writing %v results to file %v", len(*values), filename)
+	if *debugLogging {
+		log.Printf("writeFile: writing %v results to file %v", len(*values), filename)
+	}
 	return os.WriteFile(filename, valuesJSON, 0644)
 }
 
@@ -300,9 +305,11 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 
 			query := fmt.Sprintf("%s[%ds]", metric, int64(lookback))
 			// Very chatty - make this a debug message?
-			//if *debugLogging {
-			log.Printf("exportMetric: executing query '%s' ending at timestamp %v", query, queryTS.Format(time.RFC3339))
-			//}
+			if *debugLogging {
+				log.Printf("exportMetric: executing query '%s' ending at timestamp %v", query, queryTS.Format(time.RFC3339))
+			} else {
+				log.Printf("exportMetric: batch %v/%v (to %v)", batch, batches, queryTS.Format(time.Stamp))
+			}
 			// TODO: Add support for overriding the timeout; remember it can only go *smaller*
 			value, _, err := promApi.Query(ctx, query, queryTS)
 
@@ -376,6 +383,94 @@ func hasConflictingFiles(filename string) (bool, error) {
 	return len(matches) > 0, nil
 }
 
+func buildInstanceLabelString(instanceList string, nodeSet string) (string, error) {
+	instanceLabelString := ""
+	if instanceList != "" {
+		// This branch of the if converts a comma separated list of instances into a regular expression that will match
+		// against each of the instance names, e.g. instance1,instance2 => (?:instance1|instance2)
+
+		// Using a CSV library here is *probably* overkill but it's not any harder to read and should save us grief if
+		// there are any weird characters in the input.
+		r := csv.NewReader(strings.NewReader(instanceList))
+		instances, err := r.Read()
+		if err != nil {
+			return "", fmt.Errorf("failed to parse --instances flag: %w", err)
+		}
+		/*
+			The extra | before the list of instance names is required so we capture certain metrics like "up"
+			that can't be relabeled and therefore do not have an exported_instance label. This may result in collecting
+			duplicates for these metrics but dupes are the lesser of two evils in this case since the "up" metric
+			is extremely useful for troubleshooting certain classes of issues.
+		*/
+		// TODO: Warn if the instances don't start with the same substring?
+		instanceLabelString = fmt.Sprintf("exported_instance=~\"(?:|%v)\"", strings.Join(instances, "|"))
+	} else if nodeSet != "" {
+		// This branch of the if converts a comma separated list of node numbers or ranges of node numbers into a
+		// regular expression that will match against node names, e.g. 1,3-7,12 => yb-dev-univname-n(?:1|3|4|5|6|7|12)
+
+		// Using a CSV library here is *probably* overkill but it's not any harder to read and should save us grief if
+		// there are any weird characters in the input.
+		r := csv.NewReader(strings.NewReader(nodeSet))
+		fields, err := r.Read()
+		if err != nil {
+			return "", fmt.Errorf("failed to parse --nodes flag: %w", err)
+		}
+		// Matches individual node numbers (natural numbers)
+		nodeNumRe := regexp.MustCompile(`^(\d+)$`)
+		// Matches ranges of the format a-c (where a and c are arbitrary natural numbers)
+		rangeRe := regexp.MustCompile(`^([1-9][0-9]*)-([1-9][0-9]*)$`)
+		var nodes []string
+		for _, v := range fields {
+			if *debugLogging {
+				log.Printf("buildInstanceLabelString: found field '%v' in --nodes flag", v)
+			}
+			rangeMatches := rangeRe.FindStringSubmatch(v)
+
+			if nodeNumRe.FindStringSubmatch(v) != nil {
+				// We'll hit this branch if we find an individual node number in a field
+				if *debugLogging {
+					log.Printf("buildInstanceLabelString: adding node n%v to the node list", v)
+				}
+				nodes = append(nodes, v)
+			} else if len(rangeMatches) == 3 {
+				// We'll hit this branch if we matched the range regular expression rangeRe above, e.g. 3-7
+				if *debugLogging {
+					log.Printf("buildInstanceLabelString: found matches '%v' in --nodes flag", rangeMatches)
+				}
+				var low, high int
+				low, err = strconv.Atoi(rangeMatches[1])
+				high, err = strconv.Atoi(rangeMatches[2])
+				if low > high {
+					log.Printf("WARN: buildInstanceLabelString: found node range '%v' with min %v greater than max %v; swapping min and max and proceeding anyway", v, low, high)
+					low, high = high, low
+				}
+				if *debugLogging {
+					log.Printf("buildInstanceLabelString: parsed lower bound '%v' and upper bound '%v' in node range '%v'", low, high, v)
+				}
+				for i := low; i <= high; i++ {
+					if *debugLogging {
+						log.Printf("buildInstanceLabelString: adding node n%v to the node list", i)
+					}
+					nodes = append(nodes, strconv.Itoa(i))
+				}
+			} else {
+				// The field is neither a node number nor a valid range, which is probably some kind of typo
+				// nb: nodes are indexed from 1, therefore ranges are not permitted to start or end at 0
+				return "", fmt.Errorf("unknown node specifier '%v' in --nodes flag", v)
+			}
+		}
+		log.Printf("buildInstanceLabelString: using node list %v", nodes)
+		/*
+			As above, the extra | before the list of instance names is required so we capture certain metrics like "up"
+			that can't be relabeled and therefore do not have an exported_instance label. This may result in collecting
+			duplicates for these metrics but dupes are the lesser of two evils in this case since the "up" metric
+			is extremely useful for troubleshooting certain classes of issues.
+		*/
+		instanceLabelString = fmt.Sprintf("exported_instance=~\"(?:|%v-n(?:%v))\"", *nodePrefix, strings.Join(nodes, "|"))
+	}
+	return instanceLabelString, nil
+}
+
 func main() {
 	flag.Parse()
 
@@ -413,22 +508,47 @@ func main() {
 		log.Fatalln("When specifying a custom --metric, output file prefix --out is required.")
 	}
 
+	if *instanceList != "" && *nodeSet != "" {
+		log.Fatalln("The --instances and --nodes flags are mutually exclusive.")
+	}
+
+	var instanceLabelString string
+	var err error
+	instanceLabelString, err = buildInstanceLabelString(*instanceList, *nodeSet)
+	if err != nil {
+		if *instanceList != "" {
+			log.Fatalf("main: unable to build PromQL instance label: %v; verify that the --instances flag is correctly formatted", err)
+		} else if *nodeSet != "" {
+			log.Fatalf("main: unable to build PromQL instance label: %v; verify that the --nodes flag is correctly formatted", err)
+		}
+	}
+	if instanceLabelString == "" {
+		log.Println("main: not filtering by exported_instance")
+	} else {
+		log.Printf("main: using exported_instance filter '%v'", instanceLabelString)
+		// Toggle collection of platform metrics off by default if using an exported_instance filter
+		if collectMetrics["platform"].isDefault {
+			log.Printf("WARN: main: metrics collection has been filtered to specific nodes; disabling collection of platform metrics (specify --platform to re-enable)")
+			collectMetrics["platform"].collect = false
+		}
+	}
+
 	logMetricCollectorConfig()
 
 	if *startTime != "" && *endTime != "" && *periodDur != 0 {
-		log.Fatalln("Too many time arguments. Specify either --start_time and --end_time or a time and --period.")
+		log.Fatalln("main: too many time arguments; specify either --start_time and --end_time or a time and --period")
 	}
 
 	var beginTS, endTS time.Time
-	var err error
+	// var err error - already declared above
 	beginTS, endTS, *periodDur, err = getRangeTimestamps(*startTime, *endTime, *periodDur)
 	if err != nil {
-		log.Fatalln("getRangeTimeStamps: ", err)
+		log.Fatalln("main: ", err)
 	}
 
 	// This check has moved below timestamp calculations because the period may now be a calculated value
 	if periodDur.Nanoseconds()%1e9 != 0 || batchDur.Nanoseconds()%1e9 != 0 {
-		log.Fatalln("--period and --batch must not have fractional seconds")
+		log.Fatalln("main: --period and --batch must not have fractional seconds")
 	}
 	if *batchDur > *periodDur {
 		batchDur = periodDur
@@ -437,7 +557,7 @@ func main() {
 	ctx := context.Background()
 	client, err := api.NewClient(api.Config{Address: *baseURL})
 	if err != nil {
-		log.Fatalln("api.NewClient:", err)
+		log.Fatalln("api.NewClient: ", err)
 	}
 	promApi := v1.NewAPI(client)
 
@@ -482,11 +602,25 @@ func main() {
 
 			var ybMetric string
 
+			// Make an empty slice with backing array capacity of 3 to hold PromQL labels
+			labels := make([]string, 0, 3)
 			if v.exportName != "" {
-				ybMetric = fmt.Sprintf("{export_type=\"%s\",node_prefix=\"%s\"}", metricName, *nodePrefix)
+				// Non-empty exportName implies this is a *_export query, e.g. node_export
+				// TODO: If the user has specified a list of instances, node_prefix should not be required here
+				// TODO: Make the Prometheus labels a map?
+				labels = append(labels, fmt.Sprintf("export_type=\"%s\"", metricName))
+				labels = append(labels, fmt.Sprintf("node_prefix=\"%s\"", *nodePrefix))
+				if instanceLabelString != "" {
+					labels = append(labels, instanceLabelString)
+				}
 			} else if v.jobName != "" {
-				ybMetric = fmt.Sprintf("{job=\"%s\"}", metricName)
+				// Non-empty jobName implies this is prometheus or platform or one of the other job="?" queries
+				labels = append(labels, fmt.Sprintf("job=\"%s\"", metricName))
+				// The prometheus and platform jobs do not have exported_instance, so no need to add
+				// the corresponding label
 			}
+			// ['export_type="node_export"', 'node_prefix="yb-dev-..."'] => '{export_type="node_export",node_prefix="yb-dev-..."}'
+			ybMetric = fmt.Sprintf("{%v}", strings.Join(labels, ","))
 
 			err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, metricName)
 
