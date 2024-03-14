@@ -33,41 +33,43 @@ const defaultPeriod = 7 * 24 * time.Hour // 7 days
 const defaultBatchDuration = 24 * time.Hour
 
 type promExport struct {
-	exportName string
-	jobName    string
-	collect    bool
-	isDefault  bool
+	exportName         string
+	jobName            string
+	collect            bool
+	changedFromDefault bool
+	requiresNodePrefix bool
 }
 
 var (
 	// Also see init() below for aliases
-	debugLogging   = flag.Bool("debug", false, "enable additional debug logging")
-	version        = flag.Bool("version", false, "prints the promdump version and exits")
-	baseURL        = flag.String("url", "http://localhost:9090", "URL for Prometheus server API")
-	startTime      = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
-	endTime        = flag.String("end_time", "", "RFC3339 `timestamp` to end querying at (default now)")
-	periodDur      = flag.Duration("period", 0, "time period to get data for")
-	batchDur       = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
-	metric         = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
-	out            = flag.String("out", "", "output file prefix; only used for custom --metric specifications")
-	nodePrefix     = flag.String("node_prefix", "", "node prefix value for Yugabyte Universe, e.g. yb-prod-appname")
-	instanceList   = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
-	nodeSet        = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
-	batchesPerFile = flag.Uint("batches_per_file", 1, "batches per output file")
+	debugLogging     = flag.Bool("debug", false, "enable additional debug logging")
+	version          = flag.Bool("version", false, "prints the promdump version and exits")
+	baseURL          = flag.String("url", "http://localhost:9090", "URL for Prometheus server API")
+	startTime        = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
+	endTime          = flag.String("end_time", "", "RFC3339 `timestamp` to end querying at (default now)")
+	periodDur        = flag.Duration("period", 0, "time period to get data for")
+	batchDur         = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
+	metric           = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
+	out              = flag.String("out", "", "output file prefix; only used for custom --metric specifications")
+	nodePrefix       = flag.String("node_prefix", "", "node prefix value for Yugabyte Universe, e.g. yb-prod-appname")
+	prefixValidation = flag.Bool("node_prefix_validation", true, "set to false to disable node prefix validation")
+	instanceList     = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
+	nodeSet          = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
+	batchesPerFile   = flag.Uint("batches_per_file", 1, "batches per output file")
 
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
 	collectMetrics = map[string]*promExport{
 		// collect: collect this by default (true/false)
-		// isDefault: this flag has NOT been overridden (placeholder set at runtime - leave true)
-		"master":     {exportName: "master_export", collect: true, isDefault: true},
-		"node":       {exportName: "node_export", collect: true, isDefault: true},
-		"platform":   {jobName: "platform", collect: true, isDefault: true},
-		"prometheus": {jobName: "prometheus", collect: false, isDefault: true},
-		"tserver":    {exportName: "tserver_export", collect: true, isDefault: true},
+		// changedFromDefault: flag has been overridden (placeholder set at runtime - leave false)
+		"master":     {exportName: "master_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
+		"node":       {exportName: "node_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
+		"platform":   {jobName: "platform", collect: true, changedFromDefault: false, requiresNodePrefix: false},
+		"prometheus": {jobName: "prometheus", collect: false, changedFromDefault: false, requiresNodePrefix: false},
+		"tserver":    {exportName: "tserver_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
 		// nb: cql_export is not a typo
 		// TODO: Maybe add a "cql" alias but if we do that, we need to squash duplicates
-		"ycql": {exportName: "cql_export", collect: true, isDefault: true},
-		"ysql": {exportName: "ysql_export", collect: true, isDefault: true},
+		"ycql": {exportName: "cql_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
+		"ysql": {exportName: "ysql_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
 	}
 
 	AppVersion = "DEV BUILD"
@@ -93,7 +95,7 @@ func init() {
 		flag.Func(k, fmt.Sprintf("``collect metrics for %v (default %v)", metricName, v.collect), func(s string) error {
 			var err error
 			v.collect, err = strconv.ParseBool(s)
-			v.isDefault = false
+			v.changedFromDefault = true
 			return err
 		})
 	}
@@ -304,7 +306,6 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 			}
 
 			query := fmt.Sprintf("%s[%ds]", metric, int64(lookback))
-			// Very chatty - make this a debug message?
 			if *debugLogging {
 				log.Printf("exportMetric: executing query '%s' ending at timestamp %v", query, queryTS.Format(time.RFC3339))
 			} else {
@@ -403,6 +404,7 @@ func buildInstanceLabelString(instanceList string, nodeSet string) (string, erro
 			is extremely useful for troubleshooting certain classes of issues.
 		*/
 		// TODO: Warn if the instances don't start with the same substring?
+		// TODO: Validate the instance list to make sure all the instances end with a node number?
 		instanceLabelString = fmt.Sprintf("exported_instance=~\"(?:|%v)\"", strings.Join(instances, "|"))
 	} else if nodeSet != "" {
 		// This branch of the if converts a comma separated list of node numbers or ranges of node numbers into a
@@ -490,16 +492,30 @@ func main() {
 	if *nodePrefix == "" && *metric == "" {
 		log.Fatalln("Specify a --node_prefix value (if collecting default Yugabyte metrics), a custom metric using --metric, or both.")
 	}
+
+	if *nodePrefix != "" && *prefixValidation {
+		prefixHasNodeNum, _ := regexp.Match("-n[0-9]+$", []byte(*nodePrefix))
+		// If a node prefix is specified, it must begin with yb- and must not end with the node number
+		// TODO: Run all the validations, then print the entire list of failures instead of throwing one-off fatals.
+		if !strings.HasPrefix(*nodePrefix, "yb-") {
+			log.Fatalf("Invalid --node_prefix value '%v'. Node prefix must start with 'yb-', e.g. yb-prod-my-universe.", *nodePrefix)
+		}
+		// TODO: Add validation for environment, e.g. yb-dev, yb-prod, etc.
+		if prefixHasNodeNum {
+			log.Fatalf("Invalid --node_prefix value '%v'. Node prefix must not include a node number. To filter by node, use --nodes or --instances.", *nodePrefix)
+		}
+	}
+
 	if *nodePrefix == "" && *metric != "" {
 		// If the user has not provided a node prefix but has provided a metric, flip default yb metrics
 		// collection off.
 		for _, v := range collectMetrics {
 			v := v
-			if v.isDefault {
+			if !v.changedFromDefault {
 				v.collect = false
 			}
-			if *nodePrefix == "" && v.collect == true {
-				log.Fatalln("Specify a --node_prefix value or remove any Yugabyte metric export collection flags (--master, --node, etc.)")
+			if *nodePrefix == "" && *instanceList == "" && v.collect && v.requiresNodePrefix {
+				log.Fatalln("Specify a --node_prefix value or a --instances value, or remove any Yugabyte metric export collection flags (--master, --node, etc.)")
 			}
 		}
 	}
@@ -527,7 +543,7 @@ func main() {
 	} else {
 		log.Printf("main: using exported_instance filter '%v'", instanceLabelString)
 		// Toggle collection of platform metrics off by default if using an exported_instance filter
-		if collectMetrics["platform"].isDefault {
+		if !collectMetrics["platform"].changedFromDefault {
 			log.Printf("WARN: main: metrics collection has been filtered to specific nodes; disabling collection of platform metrics (specify --platform to re-enable)")
 			collectMetrics["platform"].collect = false
 		}
@@ -606,10 +622,14 @@ func main() {
 			labels := make([]string, 0, 3)
 			if v.exportName != "" {
 				// Non-empty exportName implies this is a *_export query, e.g. node_export
-				// TODO: If the user has specified a list of instances, node_prefix should not be required here
 				// TODO: Make the Prometheus labels a map?
 				labels = append(labels, fmt.Sprintf("export_type=\"%s\"", metricName))
-				labels = append(labels, fmt.Sprintf("node_prefix=\"%s\"", *nodePrefix))
+				if *nodePrefix != "" {
+					// Only print the node prefix selector if a node prefix was specified. The command line args are
+					// validated at an earlier stage, so if we've reached this point, it means we already know the
+					// prefix isn't required.
+					labels = append(labels, fmt.Sprintf("node_prefix=\"%s\"", *nodePrefix))
+				}
 				if instanceLabelString != "" {
 					labels = append(labels, instanceLabelString)
 				}
