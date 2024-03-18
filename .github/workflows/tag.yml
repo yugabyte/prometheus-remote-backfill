@@ -19,6 +19,7 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: 1.19
+        cache-dependency-path: "**/go.sum"
 
     - name: Build promdump
       working-directory: ./promdump
