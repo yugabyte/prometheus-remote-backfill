@@ -6,12 +6,15 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -25,7 +28,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/api"
-	"github.com/prometheus/client_golang/api/prometheus/v1"
+	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 )
 
@@ -371,6 +374,80 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 	return writeFile(&values, filePrefix, fileNum)
 }
 
+func createArchive(files []string, buf io.Writer) error {
+	// Create new Writers for gzip and tar
+	// These writers are chained. Writing to the tar writer will
+	// write to the gzip writer which in turn will write to
+	// the "buf" writer
+	gw := gzip.NewWriter(buf)
+	defer gw.Close()
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	// Iterate over files and add them to the tar archive
+	for _, file := range files {
+		matches, err := filepath.Glob(file)
+		if err != nil {
+			return err
+		}
+		for _, match := range matches {
+			err := addToArchive(tw, match)
+			if err != nil {
+				return err
+			}
+			// Remove the file after it has been added to the archive
+			err = os.Remove(match)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func addToArchive(tw *tar.Writer, filename string) error {
+	// Open the file which will be written into the archive
+	file, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Get FileInfo about our file providing file size, mode, etc.
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+
+	// Create a tar Header from the FileInfo data
+	header, err := tar.FileInfoHeader(info, info.Name())
+	if err != nil {
+		return err
+	}
+
+	// Use full path as name (FileInfoHeader only takes the basename)
+	// If we don't do this the directory structure would
+	// not be preserved
+
+	header.Name = filename
+
+	// Write file header to the tar archive
+	err = tw.WriteHeader(header)
+	if err != nil {
+		return err
+	}
+
+	// Copy file content to tar archive
+	_, err = io.Copy(tw, file)
+	if err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
 	// TODO: Refactor to use this func or get rid of it
 	return nil, nil
@@ -656,4 +733,21 @@ func main() {
 			log.Fatalln("exportMetric:", err)
 		}
 	}
+
+	files := []string{"platform.*", "*export.*"}
+
+	// Create output file
+	out, err := os.Create("promdump.tar.gz")
+	if err != nil {
+		log.Fatalln("Error writing archive:", err)
+	}
+	defer out.Close()
+
+	// Create the archive and write the output to the "out" Writer
+	err = createArchive(files, out)
+	if err != nil {
+		log.Fatalln("Error creating archive:", err)
+	}
+
+	fmt.Println("Archive created successfully")
 }
