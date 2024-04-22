@@ -735,8 +735,23 @@ func main() {
 	}
 
 	files := []string{"platform.*", "*export.*"}
+	var anyFiles bool
+	for _, pattern := range files {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			log.Fatalf("Error matching pattern %s: %v", pattern, err)
+		}
+		if len(matches) > 0 {
+			anyFiles = true
+			break
+		}
+	}
 
-	// Create output file
+	// If no files match the patterns, do nothing and exit
+	if !anyFiles {
+		fmt.Println("Error while generating promdump. Please do look erros above ")
+		return
+	}
 	out, err := os.Create("promdump.tar.gz")
 	if err != nil {
 		log.Fatalln("Error writing archive:", err)
@@ -749,5 +764,5 @@ func main() {
 		log.Fatalln("Error creating archive:", err)
 	}
 
-	fmt.Println("Archive created successfully")
+	fmt.Println("Promdump.tar.gz Successfully created")
 }
