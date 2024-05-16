@@ -7,13 +7,18 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	ywclient "github.com/yugabyte/platform-go-client"
+	"io"
 	"log"
 	"math"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,6 +36,8 @@ import (
 
 const defaultPeriod = 7 * 24 * time.Hour // 7 days
 const defaultBatchDuration = 24 * time.Hour
+const defaultYbaHostname = "localhost"
+const defaultPromPort = 9090
 
 type promExport struct {
 	exportName         string
@@ -41,21 +48,32 @@ type promExport struct {
 }
 
 var (
+	defaultBaseUrl = fmt.Sprintf("http://%v:%v", defaultYbaHostname, defaultPromPort)
+
 	// Also see init() below for aliases
-	debugLogging     = flag.Bool("debug", false, "enable additional debug logging")
-	version          = flag.Bool("version", false, "prints the promdump version and exits")
-	baseURL          = flag.String("url", "http://localhost:9090", "URL for Prometheus server API")
-	startTime        = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
-	endTime          = flag.String("end_time", "", "RFC3339 `timestamp` to end querying at (default now)")
-	periodDur        = flag.Duration("period", 0, "time period to get data for")
-	batchDur         = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
-	metric           = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
-	out              = flag.String("out", "", "output file prefix; only used for custom --metric specifications")
-	nodePrefix       = flag.String("node_prefix", "", "node prefix value for Yugabyte Universe, e.g. yb-prod-appname")
-	prefixValidation = flag.Bool("node_prefix_validation", true, "set to false to disable node prefix validation")
-	instanceList     = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
-	nodeSet          = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
-	batchesPerFile   = flag.Uint("batches_per_file", 1, "batches per output file")
+	debugLogging            = flag.Bool("debug", false, "enable additional debug logging")
+	version                 = flag.Bool("version", false, "prints the promdump version and exits")
+	listUniverses           = flag.Bool("list_universes", false, "prints the list of Universes known to YBA and exits; requires a --yba_api_token")
+	baseURL                 = flag.String("url", defaultBaseUrl, "URL for Prometheus server API")
+	startTime               = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
+	endTime                 = flag.String("end_time", "", "RFC3339 `timestamp` to end querying at (default now)")
+	periodDur               = flag.Duration("period", 0, "time period to get data for")
+	batchDur                = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
+	metric                  = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
+	out                     = flag.String("out", "", "output file prefix; only used for custom --metric specifications")
+	nodePrefix              = flag.String("node_prefix", "", "node prefix value for Yugabyte Universe, e.g. yb-prod-appname (deprecated)")
+	prefixValidation        = flag.Bool("node_prefix_validation", true, "set to false to disable node prefix validation")
+	universeName            = flag.String("universe_name", "", "the name of the Universe for which to collect metrics, as shown in the YBA UI")
+	universeUuid            = flag.String("universe_uuid", "", "the UUID of the Universe for which to collect metrics")
+	instanceList            = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
+	nodeSet                 = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
+	batchesPerFile          = flag.Uint("batches_per_file", 1, "batches per output file")
+	useYbaApi               = false
+	ybaHostname             = flag.String("yba_api_hostname", defaultYbaHostname, "the hostname to use for calls to the YBA API (optional)")
+	ybaApiTimeout           = flag.Duration("yba_api_timeout", 10, "the HTTP timeout to use for YBA API calls, in seconds (optional)")
+	ybaToken                = flag.String("yba_api_token", "", "the API token to use for communication with YBA (optional)")
+	ybaTls                  = flag.Bool("yba_api_use_tls", true, "set to false to disable TLS for YBA API calls (insecure)")
+	skipYbaHostVerification = flag.Bool("skip_yba_host_verification", false, "bypasses TLS certificate verification for YBA API calls (insecure)")
 
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
 	collectMetrics = map[string]*promExport{
@@ -473,6 +491,195 @@ func buildInstanceLabelString(instanceList string, nodeSet string) (string, erro
 	return instanceLabelString, nil
 }
 
+func setupYBAAPI(ctx context.Context) (*ywclient.APIClient, error) {
+	// A very large number of customers are using self-signed certificates, so we need to be able to turn off
+	// certificate verification.
+	tlsCc := &tls.Config{
+		InsecureSkipVerify: *skipYbaHostVerification,
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig: tlsCc,
+	}
+
+	httpClient := &http.Client{
+		Timeout:   time.Second * *ybaApiTimeout,
+		Transport: tr,
+	}
+
+	configuration := ywclient.NewConfiguration()
+	if *ybaTls {
+		configuration.Scheme = "https"
+	} else {
+		configuration.Scheme = "http"
+	}
+
+	log.Printf("Using hostname '%v' to connect to the YBA API", *ybaHostname)
+
+	// Validate the provided YBA hostname by performing a hostname lookup on it. The behaviour of this lookup may
+	// vary by operating system. Discard the returned IP address list because we don't actually care what the IP is,
+	// only that hostname resolution succeeded.
+	_, err := net.LookupHost(*ybaHostname)
+	if err != nil {
+		log.Fatalf("YBA hostname lookup failed: %v", err)
+	}
+	configuration.Host = *ybaHostname
+	configuration.Debug = *debugLogging
+	configuration.HTTPClient = httpClient
+
+	return ywclient.NewAPIClient(configuration), nil
+}
+
+func getCustomerUuid(ctx context.Context, client *ywclient.APIClient) (string, error) {
+	if *debugLogging {
+		log.Println("Making YBA API call ListOfCustomers")
+	}
+	customers, r, err := client.CustomerManagementApi.ListOfCustomers(ctx).Execute()
+	if err != nil {
+		return "", fmt.Errorf("API call ListOfCustomers failed: %w", err)
+	}
+	defer func() {
+		err := r.Body.Close()
+		if err != nil {
+			log.Fatalf("getCustomerUuid: failed to close HTTP response body: %v", err)
+		}
+	}()
+	// Status codes between 200 and 299 indicate success
+	statusOK := r.StatusCode >= 200 && r.StatusCode < 300
+	if !statusOK {
+		// In case we later need special handling for specific http status codes
+		var msg error
+		switch r.StatusCode {
+		default:
+			msg = fmt.Errorf("http request failed with status %v", r.StatusCode)
+		}
+		return "", fmt.Errorf("API call ListOfCustomers failed: %w", msg)
+	}
+	if len(customers) > 1 {
+		return "", fmt.Errorf("multi-tenant environments are not currently supported")
+	}
+	customer := customers[0]
+
+	if *debugLogging {
+		log.Printf("getCustomerUuid: found customer '%v' with UUID '%v'", customer.Name, *customer.Uuid)
+	}
+	return *customer.Uuid, nil
+}
+
+func getUniverseList(ctx context.Context, client *ywclient.APIClient, cUuid string) ([]ywclient.UniverseResp, error) {
+	universes, r, err := client.UniverseManagementApi.ListUniverses(ctx, cUuid).Execute()
+	if err != nil {
+		return []ywclient.UniverseResp{}, fmt.Errorf("API call ListUniverses failed: %w", err)
+	}
+	defer func() {
+		err := r.Body.Close()
+		if err != nil {
+			log.Fatalf("getCustomerUuid: failed to close HTTP response body: %v", err)
+		}
+	}()
+	statusOK := r.StatusCode >= 200 && r.StatusCode < 300
+	if !statusOK {
+		var msg error
+		switch r.StatusCode {
+		default:
+			msg = fmt.Errorf("http request failed with status %v", r.StatusCode)
+		}
+		return []ywclient.UniverseResp{}, fmt.Errorf("API call GetUniverse failed: %w", msg)
+	}
+
+	return universes, nil
+}
+
+func getUniverseByName(ctx context.Context, client *ywclient.APIClient, cUuid string, universeName string) (ywclient.UniverseResp, error) {
+	// TODO: This could probably be DRY'd out
+	universes, r, err := client.UniverseManagementApi.ListUniverses(ctx, cUuid).Name(universeName).Execute()
+	if err != nil {
+		return ywclient.UniverseResp{}, fmt.Errorf("API call ListUniverses failed: %w", err)
+	}
+	defer func() {
+		err := r.Body.Close()
+		if err != nil {
+			log.Fatalf("getCustomerUuid: failed to close HTTP response body: %v", err)
+		}
+	}()
+	statusOK := r.StatusCode >= 200 && r.StatusCode < 300
+	if !statusOK {
+		var msg error
+		switch r.StatusCode {
+		default:
+			msg = fmt.Errorf("http request failed with status %v", r.StatusCode)
+		}
+		return ywclient.UniverseResp{}, fmt.Errorf("API call GetUniverse failed: %w", msg)
+	}
+	// If we get back 0 Universes, it probably means we were given a bad --universe_name
+	if len(universes) == 0 {
+		return ywclient.UniverseResp{}, fmt.Errorf("universe with name '%v' not found", universeName)
+	}
+	// Universe names must be unique, so the first Universe should be the only Universe
+	if len(universes) > 1 {
+		return ywclient.UniverseResp{}, fmt.Errorf("multiple universes with universe name '%v' found, which should never happen", universeName)
+	}
+	universe := universes[0]
+
+	return universe, nil
+}
+
+func getUniverseByUuid(ctx context.Context, client *ywclient.APIClient, cUuid string, universeUuid string) (ywclient.UniverseResp, error) {
+	universe, r, err := client.UniverseManagementApi.GetUniverse(ctx, cUuid, universeUuid).Execute()
+	statusOK := r.StatusCode >= 200 && r.StatusCode < 300
+	// The YBA API is doing the wrong thing here. The GetUniverse call returns an error if the HTTP call succeeds but
+	// the server responds with an HTTP error code. This violates the semantics of the Golang http client in various
+	//  ways.
+	if err != nil || !statusOK {
+		switch r.StatusCode {
+		case 400:
+			// Response Body:
+			// {
+			//   "success":false,
+			//   "httpMethod":"GET",
+			//   "requestUri":"/api/v1/customers/ca1b9bda-0000-0000-0000-2b8068ccd5e2/universes/fdb24ab4-0000-0000-0000-6763d1af32d0",
+			//   "error":"Cannot find universe fdb24ab4-0000-0000-0000-6763d1af32d0"
+			// }
+			var apiError ywclient.YBPError
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				return ywclient.UniverseResp{}, fmt.Errorf("failed to read response body while handling HTTP error: %w", err)
+			}
+			err = json.Unmarshal(body, &apiError)
+			if err != nil {
+				return ywclient.UniverseResp{}, fmt.Errorf("failed to unmarshal JSON response while handling HTTP error: %w", err)
+			}
+			if strings.HasPrefix(*apiError.Error, "Cannot find universe") {
+				return ywclient.UniverseResp{}, fmt.Errorf("universe with UUID '%v' not found", universeUuid)
+			} else {
+				return ywclient.UniverseResp{}, fmt.Errorf("unknown error while handling HTTP error 400 from YBA API; bad response: %+v", r)
+			}
+		default:
+			return ywclient.UniverseResp{}, fmt.Errorf("HTTP request failed with status %v; bad response: %+v", r.StatusCode, r)
+		}
+	}
+	// We are deliberately leaking a socket here because there are cases that might lead to a double close, which would
+	// crash the promdump utility. promdump is a short-lived process and the leaked socket will be cleaned up on
+	// exit anyway.
+	// defer r.Body.Close()
+	log.Printf("Found Universe '%v'", *universe.Name)
+
+	return universe, nil
+}
+
+// TODO: Should this use a writer?
+func printUniverseList(universes []ywclient.UniverseResp) {
+	fmt.Println()
+	fmt.Printf("%4v\t%-36v\t%-30v\n", "#", "Universe UUID", "Universe Name")
+	fmt.Printf("%v\t%v\t%v\n", strings.Repeat("-", 4), strings.Repeat("-", 36), strings.Repeat("-", 30))
+	//log.Println("#   \tUniverse UUID                       \tUniverse Name")
+	//fmt.Println("----\t------------------------------------\t------------------------------")
+	for k, v := range universes {
+		fmt.Printf("%4v\t%v\t%v\n", k+1, *v.UniverseUUID, *v.Name)
+	}
+	fmt.Println()
+}
+
 func main() {
 	flag.Parse()
 
@@ -489,8 +696,106 @@ func main() {
 		log.Fatalf("Too many arguments: %v. Check for typos.", strings.Join(flag.Args(), " "))
 	}
 
+	// Don't include ybaHostname in the list of flags that trigger YBA API mode because it has a default value
+	if *listUniverses || *universeName != "" || *universeUuid != "" || *ybaToken != "" {
+		useYbaApi = true
+	}
+
+	if useYbaApi {
+		if *ybaToken == "" {
+			log.Fatalln("The --yba_api_token flag is required when using the YBA API. See the YBA API documentation at: https://api-docs.yugabyte.com/")
+		}
+
+		// The customer has specified a node prefix and also a flag that activates YBA mode. This is not allowed.
+		if *nodePrefix != "" {
+			log.Fatalln("The --node_prefix flag is incompatible with the YBA API. Use --universe_name or --universe_uuid instead.")
+		}
+
+		if (*universeName == "" && *universeUuid == "") && !*listUniverses {
+			log.Fatalln("One of --universe_name or --universe_uuid must be specified when using the YBA API.")
+		}
+
+		if *universeName != "" && *universeUuid != "" {
+			log.Fatalln("The --universe_name and --universe_uuid flags are mutually exclusive.")
+		}
+
+		if *universeUuid != "" {
+			// fdb24ab4-0000-0000-0000-6763d1af32d9
+			isValidUuid, err := regexp.Match("^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", []byte(*universeUuid))
+			if err != nil {
+				log.Fatalf("Failed to validate --universe_uuid flag: %v", err)
+			}
+			if !isValidUuid {
+				log.Fatalf("Invalid UUID in --universe_uuid flag. UUIDs must be hexadecimal digits and dashes in the format 'fdb24ab4-0000-0000-0000-6763d1af32d9'")
+			}
+		}
+
+		// Create a context with the YBA API token in it to pass into functions that make YBA API calls
+		ybaCtx := context.WithValue(context.Background(),
+			ywclient.ContextAPIKeys,
+			map[string]ywclient.APIKey{
+				"apiKeyAuth": {
+					Key: *ybaToken,
+				},
+			})
+
+		ybaClient, err := setupYBAAPI(ybaCtx)
+		if err != nil {
+			log.Fatalf("Failed to initialize the YBA API: %v", err)
+		}
+
+		cUuid, err := getCustomerUuid(ybaCtx, ybaClient)
+		if err != nil {
+			log.Fatalf("Failed to retrieve customer UUID from YBA: %v", err)
+		}
+		log.Printf("Found customer UUID '%v'", cUuid)
+
+		if *listUniverses {
+			universes, err := getUniverseList(ybaCtx, ybaClient, cUuid)
+			if err != nil {
+				log.Fatalf("getUniverseList: failed with: %v", err)
+			}
+			printUniverseList(universes)
+			os.Exit(0)
+		}
+
+		var universe ywclient.UniverseResp
+		if *universeName != "" {
+			log.Printf("Looking up Universe with name '%v' using the YBA API", *universeName)
+			universe, err = getUniverseByName(ybaCtx, ybaClient, cUuid, *universeName)
+			if err != nil {
+				log.Printf("getUniverseByName: failed with: %v", err)
+				universes, err := getUniverseList(ybaCtx, ybaClient, cUuid)
+				if err != nil {
+					log.Fatalf("getUniverseList: failed with: %v", err)
+				}
+				printUniverseList(universes)
+				log.Fatalf("Specify a Universe from the list above using --universe_uuid or --universe_name")
+			}
+			log.Printf("Found Universe '%v'", *universe.Name)
+		} else if *universeUuid != "" {
+			log.Printf("Looking up Universe with UUID '%v' using the YBA API", *universeUuid)
+			universe, err = getUniverseByUuid(ybaCtx, ybaClient, cUuid, *universeUuid)
+			if err != nil {
+				log.Printf("getUniverseByUuid: failed with: %v", err)
+				universes, err := getUniverseList(ybaCtx, ybaClient, cUuid)
+				if err != nil {
+					log.Fatalf("getUniverseList: failed with: %v", err)
+				}
+				printUniverseList(universes)
+				log.Fatalf("Specify a Universe from the list above using --universe_uuid or --universe_name")
+			}
+		}
+		log.Printf("Found node prefix '%v' for Universe '%v'", *universe.UniverseDetails.NodePrefix, *universe.Name)
+		*nodePrefix = *universe.UniverseDetails.NodePrefix
+		// Since we got the node prefix directly from YBA, we're going to assume it's correct and  turn validation OFF
+		*prefixValidation = false
+	} else {
+		log.Printf("Warning: The --node_prefix flag is deprecated. It is recommended to provide a --yba_api_token and use --universe_name or --universe_uuid instead.")
+	}
+
 	if *nodePrefix == "" && *metric == "" {
-		log.Fatalln("Specify a --node_prefix value (if collecting default Yugabyte metrics), a custom metric using --metric, or both.")
+		log.Fatalln("Specify a universe by name or UUID (if collecting default Yugabyte metrics), a custom metric using --metric, or both.")
 	}
 
 	if *nodePrefix != "" && *prefixValidation {
