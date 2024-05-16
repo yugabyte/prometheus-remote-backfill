@@ -61,9 +61,9 @@ var (
 	instanceList     = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
 	nodeSet          = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
 	batchesPerFile   = flag.Uint("batches_per_file", 1, "batches per output file")
-	enableTar        = flag.Bool("tar", false, "enable tar feature")          // Flag to control whether tar is enabled
-	compression      = flag.String("compression", "gzip", "compression type") // Flag to control compression type
-	tarFilename      = flag.String("filename", "", "tar filename")            // Flag to set the tar filename with a sensible default
+	enableTar        = flag.Bool("tar", true, "enable bundling exported metrics into a tar file")
+	tarCompression   = flag.String("tar_compression_algorithm", "none", "compression algorithm to use when creating a tar bundle; one of \"gzip\", \"bzip2\", or \"none\"")
+	tarFilename      = flag.String("tar_filename", "", "filename for the generated tar file")
 
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
 	collectMetrics = map[string]*promExport{
@@ -84,9 +84,6 @@ var (
 	CommitHash = "POPULATED_BY_BUILD"
 	BuildTime  = "POPULATED_BY_BUILD"
 )
-
-// Holds cutom matric file counts
-var customMatricCount uint
 
 func init() {
 	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
@@ -176,8 +173,6 @@ func writeFile(values *[]*model.SampleStream, filePrefix string, fileNum uint) e
 		log.Printf("writeFile: writing %v results to file %v", len(*values), filename)
 	}
 	return os.WriteFile(filename, valuesJSON, 0644)
-
-	// Return filename, metricName (same as filename), and the file itself as out
 
 }
 
@@ -386,33 +381,35 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 
 }
 
+// Holds custom metric file counts
+var customMetricCount uint
+
 func createArchive(buf io.Writer) error {
-	// Create new Writers for gzip , bzip2 and tar
-	// These writers are chained. Writing to the tar writer will
+	// Create new Writers for gzip , bzip2 and none(tar)
 
 	var tw *tar.Writer
 
-	switch *compression {
+	switch *tarCompression {
 	case "gzip":
 		gw := gzip.NewWriter(buf)
 		defer gw.Close()
 		tw = tar.NewWriter(gw)
 
 	case "bzip2":
-		// Add support for bzip2 compression
-		bw, err := bzip2.NewWriter(buf, nil) // Pass nil as the second argument, since bzip2 required to two argument so
+		bw, err := bzip2.NewWriter(buf, nil)
 		if err != nil {
 			return err
 		}
 		defer bw.Close()
 		tw = tar.NewWriter(bw)
+
+	case "none":
+		tw = tar.NewWriter(buf)
 	default:
-		return fmt.Errorf("unsupported compression type: %s", *compression)
+		fmt.Errorf("unsupported compression type: %s , using default tar_compression_algorithm", *tarCompression)
 
 	}
 	defer tw.Close()
-
-	var filesToArchive []string
 
 	// Iterate over collectMetrics and add them to the tar archive
 	for _, v := range collectMetrics {
@@ -422,29 +419,26 @@ func createArchive(buf io.Writer) error {
 				log.Fatalf("createArchive: %v", err)
 			}
 			filename := fmt.Sprintf("%s.%05d", metricName, i)
-			filesToArchive = append(filesToArchive, filename)
+			err = addToArchive(tw, filename)
+			if err != nil {
+				return err
+			}
+
 		}
 	}
-	//custom filename collect nd add them to the tar archiv
-	if *metric != "" {
-		for i := 0; i < int(customMatricCount); i++ {
-			filename := fmt.Sprintf("%s.%05d", *metric, i)
-			filesToArchive = append(filesToArchive, filename)
+	//custom filename collect and add them to the tar archive
+	if *out != "" {
+		for i := 0; i < int(customMetricCount); i++ {
+			filename := fmt.Sprintf("%s.%05d", *out, i)
+			err := addToArchive(tw, filename)
+			if err != nil {
+				return err
+			}
+
 		}
+
 	}
 
-	for _, file := range filesToArchive {
-		// Add the file to the tar archive
-		err := addToArchive(tw, file)
-		if err != nil {
-			return err
-		}
-		// Remove the file after it has been added to the archive
-		err = os.Remove(file)
-		if err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -482,12 +476,18 @@ func addToArchive(tw *tar.Writer, filename string) error {
 	return nil
 }
 
-func generateDefaultFilename() string {
-	compressionType := *compression
-	if compressionType == "gzip" {
+func generateDefaultTarFilename() string {
+	compressionType := *tarCompression
+
+	switch compressionType {
+	case "gzip":
 		return fmt.Sprintf("promdump-%s-%s.tar.gz", *nodePrefix, time.Now().Format("20060102-150405")) // Format: YYYYMMDD-HHMMSS
+	case "bzip2":
+		return fmt.Sprintf("promdump-%s-%s.tar.bz2", *nodePrefix, time.Now().Format("20060102-150405"))
+
 	}
-	return fmt.Sprintf("promdump-%s-%s.bz2", *nodePrefix, time.Now().Format("20060102-150405"))
+	return fmt.Sprintf("promdump-%s-%s.tar", *nodePrefix, time.Now().Format("20060102-150405"))
+
 }
 
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
@@ -726,8 +726,6 @@ func main() {
 		log.Fatalf("main: found existing export files with file prefix(es): %v; move any existing export files aside before proceeding", strings.Join(conflictPrefixes, " "))
 	}
 
-	var fileCount uint
-
 	// TODO: DRY this out
 	// Loop through yb metrics list and export each metric according to its configuration
 	for _, v := range collectMetrics {
@@ -763,81 +761,61 @@ func main() {
 			// ['export_type="node_export"', 'node_prefix="yb-dev-..."'] => '{export_type="node_export",node_prefix="yb-dev-..."}'
 			ybMetric = fmt.Sprintf("{%v}", strings.Join(labels, ","))
 
-			fileCount, err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, metricName)
+			v.fileCount, err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, metricName)
 
 			if err != nil {
 				log.Printf("exportMetric: export of metric %v failed with error %v; moving to next metric", metricName, err)
 				continue
 			}
-			v.fileCount = fileCount
-			fileCount = 0
 		}
 	}
 	if *metric != "" {
-		customMatricCount, err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
+		customMetricCount, err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
 		if err != nil {
 			log.Fatalln("exportMetric:", err)
 		}
 	}
 
-	// tar the file when Tar feature is enable
-
 	if *enableTar {
-		// Set default filename if not provided
-
 		var filename string
-
+		filename = *tarFilename
 		if *tarFilename == "" {
-			// If filename is not provided, generate a default filename
-			filename = generateDefaultFilename()
+			// If filename is not provided, generate a default tar filename
+			filename = generateDefaultTarFilename()
 		} else {
-			filename = *tarFilename
-			// Given  filename is properly not given (missing extension)
-			tarExtension := ".tar.gz"
-			bz2Extension := ".bz2"
-
-			fileExtension := strings.HasSuffix(filename, tarExtension) || strings.HasSuffix(filename, bz2Extension)
-
-			if !fileExtension {
-
-				fmt.Println("Please prodive proper filename with extension \n")
-
-				return
-
-			}
-
-			// If filename is provided and it already exists, generate a default filename
+			// Check if filename already exists
 			if _, err := os.Stat(filename); err == nil {
-				defaultFilename := generateDefaultFilename()
-				if filename != defaultFilename {
-					fmt.Println(filename, "already exists using default filename \n")
-					filename = defaultFilename
-				}
+				log.Fatalf("Error: %s already exists. Please choose a different filename.\n", filename)
+				return
 			}
 		}
 
 		out, err := os.Create(filename)
 		if err != nil {
-			log.Fatalln("Error writing archive:", err)
+			log.Printf("Error writing archive: %v (File: %s)\n", err, filename)
+			return
 		}
-		// Defer file closure immediately after creating the file with error handling
-		defer func() {
-			if cerr := out.Close(); cerr != nil {
-				log.Println("Error closing file:", cerr)
-			}
-		}()
 
-		tw := tar.NewWriter(out)
-		defer tw.Close()
-
-		// Create the archive and write the output to the "out" Writer
-
+		// Create the archive
 		err = createArchive(out)
 		if err != nil {
-			log.Fatalln("Error creating archive:", err)
+			log.Printf("Error creating archive: %v\n", err)
+		}
+		// cleaning files
+		for _, v := range collectMetrics {
+			metricName, err := getMetricName(v)
+			if err != nil {
+				log.Fatalf("Error removing files: %v", err)
+			}
+			if v.collect {
+				_, err := cleanFiles(metricName, v.fileCount)
+				if err != nil {
+					log.Fatalf("Error removing files: %v", err)
+				}
+			}
 		}
 
-		fmt.Println(filename, "created successfully") //Create the tar.Writer for the output file
-	}
+		fmt.Println("Finished creating metrics Tarball file:", filename)
 
+	}
 }
