@@ -730,6 +730,13 @@ func main() {
 			}
 		}
 
+		if !*ybaTls {
+			log.Printf("Warning: Disabling TLS for YBA communication is insecure and not recommended!")
+		} else if *skipYbaHostVerification { // ybaTls is implicitly true here
+			// Only reached if TLS is enabled and skipYbaHostVerification is true
+			log.Println("Warning: Disabling YBA host verification is insecure and not recommended!")
+		}
+
 		// Create a context with the YBA API token in it to pass into functions that make YBA API calls
 		ybaCtx := context.WithValue(context.Background(),
 			ywclient.ContextAPIKeys,
