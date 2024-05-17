@@ -574,7 +574,7 @@ func getUniverseList(ctx context.Context, client *ywclient.APIClient, cUuid stri
 	defer func() {
 		err := r.Body.Close()
 		if err != nil {
-			log.Fatalf("getCustomerUuid: failed to close HTTP response body: %v", err)
+			log.Fatalf("getUniverseList: failed to close HTTP response body: %v", err)
 		}
 	}()
 	statusOK := r.StatusCode >= 200 && r.StatusCode < 300
@@ -599,7 +599,7 @@ func getUniverseByName(ctx context.Context, client *ywclient.APIClient, cUuid st
 	defer func() {
 		err := r.Body.Close()
 		if err != nil {
-			log.Fatalf("getCustomerUuid: failed to close HTTP response body: %v", err)
+			log.Fatalf("getUniverseByName: failed to close HTTP response body: %v", err)
 		}
 	}()
 	statusOK := r.StatusCode >= 200 && r.StatusCode < 300
