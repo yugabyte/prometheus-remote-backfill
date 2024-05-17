@@ -109,6 +109,7 @@ var (
 func init() {
 	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
 	flag.StringVar(endTime, "timestamp", "", "alias for end_time (`timestamp`)")
+	flag.StringVar(ybaHostname, "yba_hostname", defaultYbaHostname, "alias for yba_api_hostname")
 	// Process CLI flags for collection of YB prometheus exports (master, node, tserver, ycql, ysql)
 	for k, v := range collectMetrics {
 		// Needed to break closure
