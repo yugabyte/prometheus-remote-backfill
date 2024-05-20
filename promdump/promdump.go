@@ -7,6 +7,7 @@ package main
 
 import (
 	"archive/tar"
+
 	"compress/gzip"
 	"context"
 	"encoding/csv"
@@ -777,45 +778,44 @@ func main() {
 	}
 
 	if *enableTar {
-		var filename string
-		filename = *tarFilename
 		if *tarFilename == "" {
 			// If filename is not provided, generate a default tar filename
-			filename = generateDefaultTarFilename()
+			*tarFilename = generateDefaultTarFilename()
 		} else {
 			// Check if filename already exists
-			if _, err := os.Stat(filename); err == nil {
-				log.Fatalf("Error: %s already exists. Please choose a different filename.\n", filename)
+			if _, err := os.Stat(*tarFilename); err == nil {
+				log.Fatalf("specified --tar_filename '%s' already exists; please choose a different filename", *tarFilename)
 				return
 			}
 		}
 
-		out, err := os.Create(filename)
+		TarFileOut, err := os.Create(*tarFilename)
 		if err != nil {
-			log.Printf("Error writing archive: %v (File: %s)\n", err, filename)
+			log.Printf("Error writing archive: %v (File: %v)\n", err, *tarFilename)
 			return
 		}
 
 		// Create the archive
-		err = createArchive(out)
+		err = createArchive(TarFileOut)
 		if err != nil {
 			log.Printf("Error creating archive: %v\n", err)
 		}
 		// cleaning files
 		for _, v := range collectMetrics {
+			v := v
 			metricName, err := getMetricName(v)
 			if err != nil {
-				log.Fatalf("Error removing files: %v", err)
+				log.Printf("could not retrieve metric name for metric v: %v", err)
 			}
 			if v.collect {
 				_, err := cleanFiles(metricName, v.fileCount)
 				if err != nil {
-					log.Fatalf("Error removing files: %v", err)
+					log.Printf("Error cleaning files : %v", err)
 				}
 			}
 		}
 
-		fmt.Println("Finished creating metrics Tarball file:", filename)
+		fmt.Println("Finished creating metrics bundle:", *tarFilename)
 
 	}
 }
