@@ -7,7 +7,6 @@ package main
 
 import (
 	"archive/tar"
-
 	"compress/gzip"
 	"context"
 	"encoding/csv"
