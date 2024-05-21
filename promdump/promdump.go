@@ -737,6 +737,8 @@ func main() {
 			log.Println("Warning: Disabling YBA host verification is insecure and not recommended!")
 		}
 
+		log.Println("main: Connecting to YBA API")
+
 		// Create a context with the YBA API token in it to pass into functions that make YBA API calls
 		ybaCtx := context.WithValue(context.Background(),
 			ywclient.ContextAPIKeys,
@@ -797,6 +799,8 @@ func main() {
 		*nodePrefix = *universe.UniverseDetails.NodePrefix
 		// Since we got the node prefix directly from YBA, we're going to assume it's correct and  turn validation OFF
 		*prefixValidation = false
+
+		log.Println("main: Finished with YBA API")
 	} else {
 		log.Printf("Warning: The --node_prefix flag is deprecated. It is recommended to provide a --yba_api_token and use --universe_name or --universe_uuid instead.")
 	}
@@ -884,6 +888,8 @@ func main() {
 		batchDur = periodDur
 	}
 
+	log.Printf("main: Beginning metric collection against Prometheus endpoint '%v'", *baseURL)
+
 	ctx := context.Background()
 	client, err := api.NewClient(api.Config{Address: *baseURL})
 	if err != nil {
@@ -970,4 +976,5 @@ func main() {
 			log.Fatalln("exportMetric:", err)
 		}
 	}
+	log.Println("main: Finished with Prometheus connection")
 }
