@@ -413,8 +413,8 @@ func createArchive(buf io.Writer) error {
 
 	// Iterate over collectMetrics and add them to the tar archive
 	for _, v := range collectMetrics {
-		for i := 0; i < int(v.fileCount); i++ {
-			metricName, err := getMetricName(v)
+		metricName, err := getMetricName(v)
+		for i := uint(0); i < v.fileCount; i++ {
 			if err != nil {
 				log.Fatalf("createArchive: %v", err)
 			}
@@ -428,7 +428,7 @@ func createArchive(buf io.Writer) error {
 	}
 	//custom filename collect and add them to the tar archive
 	if *out != "" {
-		for i := 0; i < int(customMetricCount); i++ {
+		for i := uint(0); i < customMetricCount; i++ {
 			filename := fmt.Sprintf("%s.%05d", *out, i)
 			err := addToArchive(tw, filename)
 			if err != nil {
