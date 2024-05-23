@@ -46,6 +46,8 @@ type promExport struct {
 }
 
 var (
+	customMetricCount uint // Holds custom metric file counts
+
 	// Also see init() below for aliases
 	debugLogging     = flag.Bool("debug", false, "enable additional debug logging")
 	version          = flag.Bool("version", false, "prints the promdump version and exits")
@@ -381,9 +383,6 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 
 }
 
-// Holds custom metric file counts
-var customMetricCount uint
-
 func createArchive(buf io.Writer) error {
 	// Create new Writers for gzip , bzip2 and none(tar)
 
@@ -406,7 +405,7 @@ func createArchive(buf io.Writer) error {
 	case "none":
 		tw = tar.NewWriter(buf)
 	default:
-		fmt.Errorf("unsupported compression type: %s , using default tar_compression_algorithm", *tarCompression)
+		return fmt.Errorf("unsupported compression type: %v , using default tar_compression_algorithm", *tarCompression)
 
 	}
 	defer tw.Close()
@@ -477,9 +476,8 @@ func addToArchive(tw *tar.Writer, filename string) error {
 }
 
 func generateDefaultTarFilename() string {
-	compressionType := *tarCompression
 
-	switch compressionType {
+	switch *tarCompression {
 	case "gzip":
 		return fmt.Sprintf("promdump-%s-%s.tar.gz", *nodePrefix, time.Now().Format("20060102-150405")) // Format: YYYYMMDD-HHMMSS
 	case "bzip2":
@@ -788,14 +786,14 @@ func main() {
 			}
 		}
 
-		TarFileOut, err := os.Create(*tarFilename)
+		tarFileOut, err := os.Create(*tarFilename)
 		if err != nil {
 			log.Printf("Error writing archive: %v (File: %v)\n", err, *tarFilename)
 			return
 		}
 
 		// Create the archive
-		err = createArchive(TarFileOut)
+		err = createArchive(tarFileOut)
 		if err != nil {
 			log.Printf("Error creating archive: %v\n", err)
 		}
