@@ -405,7 +405,8 @@ func createArchive(buf io.Writer) error {
 	case "none":
 		tw = tar.NewWriter(buf)
 	default:
-		return fmt.Errorf("unsupported compression type: %v , using default tar_compression_algorithm", *tarCompression)
+		log.Fatalf("unsupported compression type: %v ", *tarCompression)
+		return nil
 
 	}
 	defer tw.Close()
