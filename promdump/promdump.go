@@ -66,7 +66,7 @@ var (
 	enableTar        = flag.Bool("tar", true, "enable bundling exported metrics into a tar file")
 	tarCompression   = flag.String("tar_compression_algorithm", "none", "compression algorithm to use when creating a tar bundle; one of \"gzip\", \"bzip2\", or \"none\"")
 	tarFilename      = flag.String("tar_filename", "", "filename for the generated tar file")
-
+	removeFiles      = flag.Bool("remove_files", true, "Clean files after taring the files")
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
 	collectMetrics = map[string]*promExport{
 		// collect: collect this by default (true/false)
@@ -799,18 +799,22 @@ func main() {
 			log.Printf("Error creating archive: %v\n", err)
 		}
 		// cleaning files
-		for _, v := range collectMetrics {
-			v := v
-			metricName, err := getMetricName(v)
-			if err != nil {
-				log.Printf("could not retrieve metric name for metric v: %v", err)
-			}
-			if v.collect {
-				_, err := cleanFiles(metricName, v.fileCount)
+		if *removeFiles {
+			for _, v := range collectMetrics {
+				v := v
+				metricName, err := getMetricName(v)
 				if err != nil {
-					log.Printf("Error cleaning files : %v", err)
+					log.Printf("could not retrieve metric name for metric v: %v", err)
+				}
+				if v.collect {
+					_, err := cleanFiles(metricName, v.fileCount)
+					if err != nil {
+						log.Printf("Error cleaning files : %v", err)
+					}
 				}
 			}
+		} else {
+			fmt.Println("Files is not remove since removefiles flag is disable")
 		}
 
 		fmt.Println("Finished creating metrics bundle:", *tarFilename)
