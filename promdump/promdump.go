@@ -6,6 +6,8 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/csv"
@@ -29,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dsnet/compress/bzip2"
 	"github.com/prometheus/client_golang/api"
 	"github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
@@ -45,6 +48,7 @@ type promExport struct {
 	collect            bool
 	changedFromDefault bool
 	requiresNodePrefix bool
+	fileCount          uint
 }
 
 var (
@@ -68,6 +72,10 @@ var (
 	instanceList            = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
 	nodeSet                 = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
 	batchesPerFile          = flag.Uint("batches_per_file", 1, "batches per output file")
+	enableTar               = flag.Bool("tar", true, "enable bundling exported metrics into a tar file")
+	tarCompression          = flag.String("tar_compression_algorithm", "gzip", "compression algorithm to use when creating a tar bundle; one of \"gzip\", \"bzip2\", or \"none\"")
+	tarFilename             = flag.String("tar_filename", "", "filename for the generated tar file")
+	keepFiles               = flag.Bool("keep_files", false, "preserve metric export files after archiving them")
 	useYbaApi               = false
 	ybaHostname             = flag.String("yba_api_hostname", defaultYbaHostname, "the hostname to use for calls to the YBA API (optional)")
 	ybaApiTimeout           = flag.Duration("yba_api_timeout", 10, "the HTTP timeout to use for YBA API calls, in seconds (optional)")
@@ -89,6 +97,7 @@ var (
 		"ycql": {exportName: "cql_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
 		"ysql": {exportName: "ysql_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
 	}
+	customMetricCount uint // Holds custom metric file counts
 
 	AppVersion = "DEV BUILD"
 	CommitHash = "POPULATED_BY_BUILD"
@@ -185,7 +194,7 @@ func writeFile(values *[]*model.SampleStream, filePrefix string, fileNum uint) e
 	return os.WriteFile(filename, valuesJSON, 0644)
 }
 
-func cleanFiles(filePrefix string, fileNum uint) (uint, error) {
+func cleanFiles(filePrefix string, fileNum uint, verbose bool) (uint, error) {
 	for i := uint(0); i < fileNum; i++ {
 		filename := fmt.Sprintf("%s.%05d", filePrefix, i)
 		err := os.Remove(filename)
@@ -195,7 +204,7 @@ func cleanFiles(filePrefix string, fileNum uint) (uint, error) {
 			return i, err
 		}
 	}
-	if fileNum > 0 {
+	if fileNum > 0 && verbose {
 		log.Printf("cleanFiles: %v stale output file(s) removed.", fileNum)
 	}
 	return fileNum, nil
@@ -299,7 +308,7 @@ func writeErrIsFatal(err error) bool {
 	return false
 }
 
-func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration, batchesPerFile uint, filePrefix string) error {
+func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration, batchesPerFile uint, filePrefix string) (uint, error) {
 	allBatchesFetched := false
 	if *debugLogging {
 		log.Printf("exportMetric: received start time %v, end time %v, and period %v", beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), periodDur)
@@ -311,7 +320,7 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 	for allBatchesFetched == false {
 		batches := uint(math.Ceil(periodDur.Seconds() / batchDur.Seconds()))
 		if batches > 99999 {
-			return fmt.Errorf("batch settings could generate %v batches, which is an unreasonable number of batches", batches)
+			return 0, fmt.Errorf("batch settings could generate %v batches, which is an unreasonable number of batches", batches)
 		}
 		log.Printf("exportMetric: querying metric '%v' from %v to %v in %v batches\n", metric, beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), batches)
 		for batch := uint(1); batch <= batches; batch++ {
@@ -339,27 +348,27 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 				if tooManySamples {
 					newBatchDur := time.Duration(batchDur.Nanoseconds() / 2)
 					log.Printf("exportMetric: too many samples in result set. Reducing batch size from %v to %v and trying again.", batchDur, newBatchDur)
-					_, err := cleanFiles(filePrefix, fileNum)
+					_, err := cleanFiles(filePrefix, fileNum, true)
 					fileNum = 0
 					if err != nil {
-						return fmt.Errorf("failed to clean up stale export files: %w", err)
+						return 0, fmt.Errorf("failed to clean up stale export files: %w", err)
 					}
 					batchDur = newBatchDur
 					if batchDur.Seconds() <= 1 {
-						return fmt.Errorf("failed to query Prometheus for metric %v - too much data even at minimum batch size", metric)
+						return 0, fmt.Errorf("failed to query Prometheus for metric %v - too much data even at minimum batch size", metric)
 					}
 					break
 				} else {
-					return err
+					return 0, err
 				}
 			}
 
 			if value == nil {
-				return fmt.Errorf("metric %v returned an invalid result set", metric)
+				return 0, fmt.Errorf("metric %v returned an invalid result set", metric)
 			}
 
 			if value.Type() != model.ValMatrix {
-				return fmt.Errorf("when querying metric %v, expected return value to be of type matrix; got type %v instead", metric, value.Type())
+				return 0, fmt.Errorf("when querying metric %v, expected return value to be of type matrix; got type %v instead", metric, value.Type())
 			}
 			// model/value.go says: type Matrix []*SampleStream
 			values = append(values, value.(model.Matrix)...)
@@ -372,7 +381,7 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 						if writeErrIsFatal(batchErr) {
 							log.Fatalf("exportMetric: %v, giving up", batchErr)
 						}
-						return batchErr
+						return 0, batchErr
 					}
 					fileNum++
 					values = make([]*model.SampleStream, 0, 0)
@@ -386,7 +395,114 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 			}
 		}
 	}
-	return writeFile(&values, filePrefix, fileNum)
+
+	return fileNum, writeFile(&values, filePrefix, fileNum)
+}
+
+func createArchive(buf io.Writer) error {
+	// Create new Writers for gzip , bzip2 and none(tar)
+
+	var tw *tar.Writer
+
+	switch *tarCompression {
+	case "gzip":
+		gw := gzip.NewWriter(buf)
+		defer gw.Close()
+		tw = tar.NewWriter(gw)
+
+	case "bzip2":
+		bw, err := bzip2.NewWriter(buf, nil)
+		if err != nil {
+			return err
+		}
+		defer bw.Close()
+		tw = tar.NewWriter(bw)
+
+	case "none":
+		tw = tar.NewWriter(buf)
+	default:
+		log.Fatalf("unsupported compression type: %v ", *tarCompression)
+		return nil
+
+	}
+	defer tw.Close()
+	log.Printf("createArchive: using tar compression format '%s'", *tarCompression)
+
+	// Iterate over collectMetrics and add them to the tar archive
+	for _, v := range collectMetrics {
+		metricName, err := getMetricName(v)
+		for i := uint(0); i < v.fileCount; i++ {
+			if err != nil {
+				log.Fatalf("createArchive: %v", err)
+			}
+			filename := fmt.Sprintf("%s.%05d", metricName, i)
+			err = addToArchive(tw, filename)
+			if err != nil {
+				return err
+			}
+
+		}
+	}
+	//custom filename collect and add them to the tar archive
+	if *out != "" {
+		for i := uint(0); i < customMetricCount; i++ {
+			filename := fmt.Sprintf("%s.%05d", *out, i)
+			err := addToArchive(tw, filename)
+			if err != nil {
+				return err
+			}
+
+		}
+
+	}
+
+	return nil
+}
+
+func addToArchive(tw *tar.Writer, filename string) error {
+	// Open the file which will be written into the archive
+	file, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Get FileInfo about our file providing file size, mode, etc.
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+
+	// Create a tar Header from the FileInfo data
+	header, err := tar.FileInfoHeader(info, info.Name())
+	if err != nil {
+		return err
+	}
+
+	// Write file header to the tar archive
+	if err := tw.WriteHeader(header); err != nil {
+		return err
+	}
+
+	// Copy file content to tar archive
+	_, err = io.Copy(tw, file)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func generateDefaultTarFilename() string {
+	switch *tarCompression {
+	case "gzip":
+		return fmt.Sprintf("promdump-%s-%s.tar.gz", *nodePrefix, time.Now().Format("20060102-150405")) // Format: YYYYMMDD-HHMMSS
+	case "bzip2":
+		return fmt.Sprintf("promdump-%s-%s.tar.bz2", *nodePrefix, time.Now().Format("20060102-150405"))
+
+	}
+
+	return fmt.Sprintf("promdump-%s-%s.tar", *nodePrefix, time.Now().Format("20060102-150405"))
 }
 
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
@@ -873,6 +989,19 @@ func main() {
 		log.Fatalln("main: too many time arguments; specify either --start_time and --end_time or a time and --period")
 	}
 
+	if *enableTar {
+		log.Printf("main: tar bundling enabled")
+		if *tarFilename == "" {
+			// If filename is not provided, generate a default tar filename
+			*tarFilename = generateDefaultTarFilename()
+			log.Printf("main: no --tar_filename specified; using filename '%s'", *tarFilename)
+		}
+		// Check if file with specified (or generated) filename already exists
+		if _, err := os.Stat(*tarFilename); err == nil {
+			log.Fatalf("specified --tar_filename '%s' already exists; please choose a different filename", *tarFilename)
+		}
+	}
+
 	var beginTS, endTS time.Time
 	// var err error - already declared above
 	beginTS, endTS, *periodDur, err = getRangeTimestamps(*startTime, *endTime, *periodDur)
@@ -962,7 +1091,7 @@ func main() {
 			// ['export_type="node_export"', 'node_prefix="yb-dev-..."'] => '{export_type="node_export",node_prefix="yb-dev-..."}'
 			ybMetric = fmt.Sprintf("{%v}", strings.Join(labels, ","))
 
-			err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, metricName)
+			v.fileCount, err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, metricName)
 
 			if err != nil {
 				log.Printf("exportMetric: export of metric %v failed with error %v; moving to next metric", metricName, err)
@@ -971,10 +1100,45 @@ func main() {
 		}
 	}
 	if *metric != "" {
-		err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
+		customMetricCount, err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
 		if err != nil {
 			log.Fatalln("exportMetric:", err)
 		}
 	}
 	log.Println("main: Finished with Prometheus connection")
+
+	if *enableTar {
+		tarFileOut, err := os.Create(*tarFilename)
+		if err != nil {
+			log.Fatalf("Error writing archive: %v (File: %v)\n", err, *tarFilename)
+		}
+
+		// Create the archive
+		log.Printf("main: creating tar archive of metric export files")
+		err = createArchive(tarFileOut)
+		if err != nil {
+			log.Fatalf("Error creating archive: %v\n", err)
+		}
+		// cleaning files
+		if !*keepFiles {
+			log.Println("main: tar archive created successfully; cleaning metric export files")
+			for _, v := range collectMetrics {
+				v := v
+				metricName, err := getMetricName(v)
+				if err != nil {
+					log.Printf("could not retrieve metric name for metric v: %v", err)
+				}
+				if v.collect {
+					_, err := cleanFiles(metricName, v.fileCount, false)
+					if err != nil {
+						log.Printf("Error cleaning files : %v", err)
+					}
+				}
+			}
+		} else {
+			log.Println("main: preserving metric export files because the --keep_files flag is set")
+		}
+
+		log.Printf("main: finished creating metrics bundle '%s'", *tarFilename)
+	}
 }
