@@ -55,33 +55,35 @@ var (
 	defaultBaseUrl = fmt.Sprintf("http://%v:%v", defaultYbaHostname, defaultPromPort)
 
 	// Also see init() below for aliases
-	debugLogging            = flag.Bool("debug", false, "enable additional debug logging")
-	version                 = flag.Bool("version", false, "prints the promdump version and exits")
-	listUniverses           = flag.Bool("list_universes", false, "prints the list of Universes known to YBA and exits; requires a --yba_api_token")
-	baseURL                 = flag.String("url", defaultBaseUrl, "URL for Prometheus server API")
-	startTime               = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
-	endTime                 = flag.String("end_time", "", "RFC3339 `timestamp` to end querying at (default now)")
-	periodDur               = flag.Duration("period", 0, "time period to get data for")
-	batchDur                = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
-	metric                  = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
-	out                     = flag.String("out", "", "output file prefix; only used for custom --metric specifications")
-	nodePrefix              = flag.String("node_prefix", "", "node prefix value for Yugabyte Universe, e.g. yb-prod-appname (deprecated)")
-	prefixValidation        = flag.Bool("node_prefix_validation", true, "set to false to disable node prefix validation")
-	universeName            = flag.String("universe_name", "", "the name of the Universe for which to collect metrics, as shown in the YBA UI")
-	universeUuid            = flag.String("universe_uuid", "", "the UUID of the Universe for which to collect metrics")
-	instanceList            = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
-	nodeSet                 = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
-	batchesPerFile          = flag.Uint("batches_per_file", 1, "batches per output file")
-	enableTar               = flag.Bool("tar", true, "enable bundling exported metrics into a tar file")
-	tarCompression          = flag.String("tar_compression_algorithm", "gzip", "compression algorithm to use when creating a tar bundle; one of \"gzip\", \"bzip2\", or \"none\"")
-	tarFilename             = flag.String("tar_filename", "", "filename for the generated tar file")
-	keepFiles               = flag.Bool("keep_files", false, "preserve metric export files after archiving them")
-	useYbaApi               = false
-	ybaHostname             = flag.String("yba_api_hostname", defaultYbaHostname, "the hostname to use for calls to the YBA API (optional)")
-	ybaApiTimeout           = flag.Duration("yba_api_timeout", 10, "the HTTP timeout to use for YBA API calls, in seconds (optional)")
-	ybaToken                = flag.String("yba_api_token", "", "the API token to use for communication with YBA (optional)")
-	ybaTls                  = flag.Bool("yba_api_use_tls", true, "set to false to disable TLS for YBA API calls (insecure)")
-	skipYbaHostVerification = flag.Bool("skip_yba_host_verification", false, "bypasses TLS certificate verification for YBA API calls (insecure)")
+	debugLogging             = flag.Bool("debug", false, "enable additional debug logging")
+	version                  = flag.Bool("version", false, "prints the promdump version and exits")
+	listUniverses            = flag.Bool("list_universes", false, "prints the list of Universes known to YBA and exits; requires a --yba_api_token")
+	baseURL                  = flag.String("url", defaultBaseUrl, "URL for Prometheus server API")
+	skipPromHostVerification = flag.Bool("skip_prometheus_host_verification", false, "bypasses TLS certificate verification for Prometheus queries (insecure)")
+	promApiTimeout           = flag.Duration("prometheus_api_timeout", 10, "the HTTP timeout to use for Prometheus API calls, in seconds (optional)")
+	startTime                = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
+	endTime                  = flag.String("end_time", "", "RFC3339 `timestamp` to end querying at (default now)")
+	periodDur                = flag.Duration("period", 0, "time period to get data for")
+	batchDur                 = flag.Duration("batch", defaultBatchDuration, "batch size: time period for each query to Prometheus server.")
+	metric                   = flag.String("metric", "", "custom metric to fetch (optional; can include label values)")
+	out                      = flag.String("out", "", "output file prefix; only used for custom --metric specifications")
+	nodePrefix               = flag.String("node_prefix", "", "node prefix value for Yugabyte Universe, e.g. yb-prod-appname (deprecated)")
+	prefixValidation         = flag.Bool("node_prefix_validation", true, "set to false to disable node prefix validation")
+	universeName             = flag.String("universe_name", "", "the name of the Universe for which to collect metrics, as shown in the YBA UI")
+	universeUuid             = flag.String("universe_uuid", "", "the UUID of the Universe for which to collect metrics")
+	instanceList             = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
+	nodeSet                  = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
+	batchesPerFile           = flag.Uint("batches_per_file", 1, "batches per output file")
+	enableTar                = flag.Bool("tar", true, "enable bundling exported metrics into a tar file")
+	tarCompression           = flag.String("tar_compression_algorithm", "gzip", "compression algorithm to use when creating a tar bundle; one of \"gzip\", \"bzip2\", or \"none\"")
+	tarFilename              = flag.String("tar_filename", "", "filename for the generated tar file")
+	keepFiles                = flag.Bool("keep_files", false, "preserve metric export files after archiving them")
+	useYbaApi                = false
+	ybaHostname              = flag.String("yba_api_hostname", defaultYbaHostname, "the hostname to use for calls to the YBA API (optional)")
+	ybaApiTimeout            = flag.Duration("yba_api_timeout", 10, "the HTTP timeout to use for YBA API calls, in seconds (optional)")
+	ybaToken                 = flag.String("yba_api_token", "", "the API token to use for communication with YBA (optional)")
+	ybaTls                   = flag.Bool("yba_api_use_tls", true, "set to false to disable TLS for YBA API calls (insecure)")
+	skipYbaHostVerification  = flag.Bool("skip_yba_host_verification", false, "bypasses TLS certificate verification for YBA API calls (insecure)")
 
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
 	collectMetrics = map[string]*promExport{
@@ -607,6 +609,27 @@ func buildInstanceLabelString(instanceList string, nodeSet string) (string, erro
 	return instanceLabelString, nil
 }
 
+func setupPromAPI(ctx context.Context) (v1.API, error) {
+	tlsCc := &tls.Config{
+		InsecureSkipVerify: *skipPromHostVerification,
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig: tlsCc,
+	}
+
+	httpClient := &http.Client{
+		Timeout:   time.Second * *promApiTimeout,
+		Transport: tr,
+	}
+
+	apiClient, err := api.NewClient(api.Config{Address: *baseURL, Client: httpClient})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Prometheus API client: %w", err)
+	}
+	return v1.NewAPI(apiClient), nil
+}
+
 func setupYBAAPI(ctx context.Context) (*ywclient.APIClient, error) {
 	// A very large number of customers are using self-signed certificates, so we need to be able to turn off
 	// certificate verification.
@@ -1020,11 +1043,10 @@ func main() {
 	log.Printf("main: Beginning metric collection against Prometheus endpoint '%v'", *baseURL)
 
 	ctx := context.Background()
-	client, err := api.NewClient(api.Config{Address: *baseURL})
+	promApi, err := setupPromAPI(ctx)
 	if err != nil {
-		log.Fatalln("api.NewClient: ", err)
+		log.Fatalln("setupPromAPI: ", err)
 	}
-	promApi := v1.NewAPI(client)
 
 	checkPrefixes := make([]string, 0, len(collectMetrics))
 	conflictPrefixes := make([]string, 0, len(collectMetrics))
