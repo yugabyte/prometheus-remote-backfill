@@ -951,7 +951,7 @@ func main() {
 
 	if *nodePrefix != "" && *prefixValidation {
 		prefixHasNodeNum, _ := regexp.Match("-n[0-9]+$", []byte(*nodePrefix))
-		validPrefixFormat, _ := regexp.Match("^yb-(?:dev|demo|stage|prod)-[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$", []byte(*nodePrefix))
+		validPrefixFormat, _ := regexp.Match("^yb-(?:dev|demo|stage|preprod|prod)-[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$", []byte(*nodePrefix))
 		// The node prefix must not end with a node number. This is a common error, so we check it specifically.
 		if prefixHasNodeNum {
 			log.Fatalf("Invalid --node_prefix value '%v'. Node prefix must not include a node number. Use --nodes or --instances to filter by node.", *nodePrefix)
@@ -960,7 +960,7 @@ func main() {
 		// Universe name. Universe names are limited to alphanumeric characters, plus dash. They must begin and end
 		// with an alphanumeric character.
 		if !validPrefixFormat {
-			log.Fatalf("Invalid --node_prefix value '%v'. Node prefixes must be in the format 'yb-<dev|demo|stage|prod>-<universe-name>', e.g. 'yb-prod-my-universe'.", *nodePrefix)
+			log.Fatalf("Invalid --node_prefix value '%v'. Node prefixes must be in the format 'yb-<dev|demo|stage|preprod|prod>-<universe-name>', e.g. 'yb-prod-my-universe'.", *nodePrefix)
 		}
 	}
 
