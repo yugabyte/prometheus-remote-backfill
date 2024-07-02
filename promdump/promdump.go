@@ -88,6 +88,8 @@ var (
 	ybaTls                   = flag.Bool("yba_api_use_tls", true, "set to false to disable TLS for YBA API calls (insecure)")
 	skipYbaHostVerification  = flag.Bool("skip_yba_host_verification", false, "bypasses TLS certificate verification for YBA API calls (insecure)")
 
+	sensitiveFlags = []string{"yba_api_token"}
+
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
 	collectMetrics = map[string]*promExport{
 		// collect: collect this by default (true/false)
@@ -883,17 +885,31 @@ func main() {
 		os.Exit(0)
 	}
 
-	logger.Println("main: using the following flags:")
+	logger.Printf(verString)
+
+	var flagString strings.Builder
+	flagString.WriteString("main: using the following flags:")
 	flag.Visit(func(f *flag.Flag) {
-		// TODO: Generalize this into a sensitive / masked flags list instead of hard-coding individual flags
-		if f.Name == "yba_api_token" {
-			logger.Printf("\t--yba_api_token=****")
-		} else {
-			logger.Printf("\t--%s=%v", f.Name, f.Value)
+		for _, sensitiveFlagName := range sensitiveFlags {
+			if f.Name == sensitiveFlagName {
+				_, err := flagString.WriteString(fmt.Sprintf(" --%s=****", f.Name))
+				if err != nil {
+					logger.Printf("main: inexplicably failed to write while adding flag '--%s=****' to flag logging string: %v", f.Name, err)
+				}
+				// This func is called once per flag, so if we've found the flag in the list of sensitive flags, we're
+				// done and the func should return.
+				return
+			}
+		}
+
+		// If the flag name doesn't match any of the sensitive flags, we'll exit the for loop and log normally
+		_, err := flagString.WriteString(fmt.Sprintf(" --%s=%v", f.Name, f.Value))
+		if err != nil {
+			logger.Printf("main: inexplicably failed to write while adding flag '--%s=%v'' to log: %v", f.Name, f.Value, err)
 		}
 	})
-
-	logger.Printf(verString)
+	// Write the complete flag string built by the string builder out to the log
+	logger.Println(flagString.String())
 
 	if *logToFile {
 		logger.Printf("main: logging to file '%s'", *logFilename)
