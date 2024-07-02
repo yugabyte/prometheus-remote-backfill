@@ -905,7 +905,7 @@ func main() {
 		// If the flag name doesn't match any of the sensitive flags, we'll exit the for loop and log normally
 		_, err := flagString.WriteString(fmt.Sprintf(" --%s=%v", f.Name, f.Value))
 		if err != nil {
-			logger.Printf("main: inexplicably failed to write while adding flag '--%s=%v'' to log: %v", f.Name, f.Value, err)
+			logger.Printf("main: inexplicably failed to write while adding flag '--%s=%v'' to flag logging string: %v", f.Name, f.Value, err)
 		}
 	})
 	// Write the complete flag string built by the string builder out to the log
