@@ -883,6 +883,16 @@ func main() {
 		os.Exit(0)
 	}
 
+	logger.Println("main: using the following flags:")
+	flag.Visit(func(f *flag.Flag) {
+		// TODO: Generalize this into a sensitive / masked flags list instead of hard-coding individual flags
+		if f.Name == "yba_api_token" {
+			logger.Printf("\t--yba_api_token=****")
+		} else {
+			logger.Printf("\t--%s=%v", f.Name, f.Value)
+		}
+	})
+
 	logger.Printf(verString)
 
 	if *logToFile {
