@@ -27,6 +27,11 @@ Yugabyte metrics have very high cardinality (lots of label values, resulting in 
 this version of the utility has a back-off mechanism, where if the Prometheus server returns a "too many samples"
 error, the batch size will be halved and the operation retried. 
 
+## promremotewrite
+
+This utility is not used internally to Yugabyte. It remains in the repo for consistency reasons but is not tested or
+routinely updated. Use at your own risk. 
+
 ## Example
 
 Dump all data of `node_filesystem_free` metric for the last year, issuing a separate query for each 12hrs of data,
