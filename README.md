@@ -29,8 +29,8 @@ error, the batch size will be halved and the operation retried.
 
 ## promremotewrite
 
-This utility is not used internally to Yugabyte. It remains in the repo for consistency reasons but is not tested or
-routinely updated. Use at your own risk. 
+This utility is not used at Yugabyte. It remains in the repo and is built automatically but is not tested or routinely
+updated. Use at your own risk. 
 
 ## Example
 
