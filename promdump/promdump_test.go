@@ -6,13 +6,15 @@ import (
 	"testing"
 )
 
-func init() {
+func setupLogging() {
 	// Need this to avoid crashing when a func under test tries to log
 	//logger = log.Default()
 	logger = log.New(io.Discard, "", 0)
 }
 
 func TestGetMetricName(t *testing.T) {
+	setupLogging()
+
 	testMetrics := map[string]*promExport{
 		"emptymetric": {collect: true, changedFromDefault: false, requiresNodePrefix: false},
 		"exporter":    {exportName: "exporter_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
