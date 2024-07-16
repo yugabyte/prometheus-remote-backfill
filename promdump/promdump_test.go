@@ -1,6 +1,16 @@
 package main
 
-import "testing"
+import (
+	"io"
+	"log"
+	"testing"
+)
+
+func init() {
+	// Need this to avoid crashing when a func under test tries to log
+	//logger = log.Default()
+	logger = log.New(io.Discard, "", 0)
+}
 
 func TestGetMetricName(t *testing.T) {
 	testMetrics := map[string]*promExport{
