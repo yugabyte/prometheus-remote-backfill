@@ -37,8 +37,8 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-const defaultPeriod = 7 * 24 * time.Hour // 7 days
-const defaultBatchDuration = 24 * time.Hour
+const defaultPeriod = 24 * time.Hour
+const defaultBatchDuration = 15 * time.Minute
 const defaultYbaHostname = "localhost"
 const defaultPromPort = 9090
 
