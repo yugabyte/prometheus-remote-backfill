@@ -55,6 +55,9 @@ var (
 	defaultBaseUrl = fmt.Sprintf("http://%v:%v", defaultYbaHostname, defaultPromPort)
 
 	// Also see init() below for aliases
+	logToFile                = flag.Bool("log_to_file", true, "write log output to file")
+	logToStderr              = flag.Bool("log_to_console", true, "write log output to console (on standard error)")
+	logFilename              = flag.String("log_filename", "promdump.log", "if logging to disk is enabled, write logs to this file")
 	debugLogging             = flag.Bool("debug", false, "enable additional debug logging")
 	version                  = flag.Bool("version", false, "prints the promdump version and exits")
 	listUniverses            = flag.Bool("list_universes", false, "prints the list of Universes known to YBA and exits; requires a --yba_api_token")
@@ -85,6 +88,8 @@ var (
 	ybaTls                   = flag.Bool("yba_api_use_tls", true, "set to false to disable TLS for YBA API calls (insecure)")
 	skipYbaHostVerification  = flag.Bool("skip_yba_host_verification", false, "bypasses TLS certificate verification for YBA API calls (insecure)")
 
+	sensitiveFlags = []string{"yba_api_token"}
+
 	// Whether to collect node_export, master_export, tserver_export, etc; see init() below for implementation
 	collectMetrics = map[string]*promExport{
 		// collect: collect this by default (true/false)
@@ -100,6 +105,7 @@ var (
 		"ysql": {exportName: "ysql_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
 	}
 	customMetricCount uint // Holds custom metric file counts
+	logger            *log.Logger
 
 	AppVersion = "DEV BUILD"
 	CommitHash = "POPULATED_BY_BUILD"
@@ -110,6 +116,7 @@ func init() {
 	flag.BoolVar(version, "v", false, "prints the promdump version and exits")
 	flag.StringVar(endTime, "timestamp", "", "alias for end_time (`timestamp`)")
 	flag.StringVar(ybaHostname, "yba_hostname", defaultYbaHostname, "alias for yba_api_hostname")
+
 	// Process CLI flags for collection of YB prometheus exports (master, node, tserver, ycql, ysql)
 	for k, v := range collectMetrics {
 		// Needed to break closure
@@ -118,7 +125,7 @@ func init() {
 
 		metricName, err := getMetricName(v)
 		if err != nil {
-			log.Fatalf("init: %v", err)
+			logger.Fatalf("init: %v", err)
 		}
 
 		// Backticks set the type string for flags in --help output
@@ -129,6 +136,27 @@ func init() {
 			return err
 		})
 	}
+}
+
+func initLogging(logFile *os.File) (*log.Logger, error) {
+	var writer io.Writer
+
+	if *logToFile && !*logToStderr {
+		writer = io.Writer(logFile)
+	} else if !*logToFile && *logToStderr {
+		writer = io.Writer(os.Stderr)
+	} else { // *logToFile && *logToStderr
+		writer = io.MultiWriter(logFile, os.Stderr)
+	}
+
+	loggerFlags := log.LstdFlags
+	if *debugLogging {
+		// Include source filenames and line numbers in debug mode
+		loggerFlags = loggerFlags | log.Lshortfile
+	}
+	logger := log.New(writer, "", loggerFlags)
+
+	return logger, nil
 }
 
 func getMetricName(metric *promExport) (string, error) {
@@ -152,11 +180,11 @@ func logMetricCollectorConfig() {
 
 		metricName, err := getMetricName(v)
 		if err != nil {
-			log.Fatalf("logMetricCollectorConfig: %v", err)
+			logger.Fatalf("logMetricCollectorConfig: %v", err)
 		}
 
 		if *out != "" && *out == metricName {
-			log.Fatalf("The output file prefix '%v' is reserved. Specify a different --out value.", metricName)
+			logger.Fatalf("The output file prefix '%v' is reserved. Specify a different --out value.", metricName)
 		}
 		if v.collect {
 			collect = append(collect, metricName)
@@ -166,14 +194,14 @@ func logMetricCollectorConfig() {
 	}
 	if len(collect) > 0 {
 		sort.Strings(collect)
-		log.Printf("main: collecting the following Yugabyte metrics: %v", strings.Join(collect, ", "))
+		logger.Printf("main: collecting the following Yugabyte metrics: %v", strings.Join(collect, ", "))
 	}
 	if len(skip) > 0 {
 		sort.Strings(skip)
-		log.Printf("main: skipping the following Yugabyte metrics: %v", strings.Join(skip, ", "))
+		logger.Printf("main: skipping the following Yugabyte metrics: %v", strings.Join(skip, ", "))
 	}
 	if *metric != "" {
-		log.Printf("main: collecting the following custom metric: '%v'", *metric)
+		logger.Printf("main: collecting the following custom metric: '%v'", *metric)
 	}
 }
 
@@ -192,7 +220,7 @@ func writeFile(values *[]*model.SampleStream, filePrefix string, fileNum uint) e
 		return err
 	}
 	if *debugLogging {
-		log.Printf("writeFile: writing %v results to file %v", len(*values), filename)
+		logger.Printf("writeFile: writing %v results to file %v", len(*values), filename)
 	}
 	return os.WriteFile(filename, valuesJSON, 0644)
 }
@@ -203,12 +231,12 @@ func cleanFiles(filePrefix string, fileNum uint, verbose bool) (uint, error) {
 		err := os.Remove(filename)
 		if err != nil {
 			// If removal of the first file fails, we have removed 0 files.
-			log.Printf("cleanFiles: %v stale output file(s) removed. Removal of file %v failed.", i, filename)
+			logger.Printf("cleanFiles: %v stale output file(s) removed. Removal of file %v failed.", i, filename)
 			return i, err
 		}
 	}
 	if fileNum > 0 && verbose {
-		log.Printf("cleanFiles: %v stale output file(s) removed.", fileNum)
+		logger.Printf("cleanFiles: %v stale output file(s) removed.", fileNum)
 	}
 	return fileNum, nil
 }
@@ -274,7 +302,7 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 	// Don't query past the current time because that would be dumb
 	if endTS.After(time.Now()) {
 		curTS := time.Now()
-		log.Printf("getRangeTimestamps: end time %v is after current time %v; setting end time to %v and recalculating period", endTS.Format(time.RFC3339), curTS.Format(time.RFC3339), curTS.Format(time.RFC3339))
+		logger.Printf("getRangeTimestamps: end time %v is after current time %v; setting end time to %v and recalculating period", endTS.Format(time.RFC3339), curTS.Format(time.RFC3339), curTS.Format(time.RFC3339))
 		endTS = curTS
 		/*
 		   Recalculate the period and round to the nearest second.
@@ -286,7 +314,7 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 	}
 
 	if *debugLogging {
-		log.Printf("getRangeTimestamps: returning start time %v, end time %v, and period %v", startTS.Format(time.RFC3339), endTS.Format(time.RFC3339), period)
+		logger.Printf("getRangeTimestamps: returning start time %v, end time %v, and period %v", startTS.Format(time.RFC3339), endTS.Format(time.RFC3339), period)
 	}
 	return startTS, endTS, period, nil
 }
@@ -314,7 +342,7 @@ func writeErrIsFatal(err error) bool {
 func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration, batchesPerFile uint, filePrefix string) (uint, error) {
 	allBatchesFetched := false
 	if *debugLogging {
-		log.Printf("exportMetric: received start time %v, end time %v, and period %v", beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), periodDur)
+		logger.Printf("exportMetric: received start time %v, end time %v, and period %v", beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), periodDur)
 	}
 
 	values := make([]*model.SampleStream, 0, 0)
@@ -325,7 +353,7 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 		if batches > 99999 {
 			return 0, fmt.Errorf("batch settings could generate %v batches, which is an unreasonable number of batches", batches)
 		}
-		log.Printf("exportMetric: querying metric '%v' from %v to %v in %v batches\n", metric, beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), batches)
+		logger.Printf("exportMetric: querying metric '%v' from %v to %v in %v batches\n", metric, beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), batches)
 		for batch := uint(1); batch <= batches; batch++ {
 			// TODO: Refactor this into getBatch()?
 			queryTS := beginTS.Add(batchDur * time.Duration(batch))
@@ -337,9 +365,9 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 
 			query := fmt.Sprintf("%s[%ds]", metric, int64(lookback))
 			if *debugLogging {
-				log.Printf("exportMetric: executing query '%s' ending at timestamp %v", query, queryTS.Format(time.RFC3339))
+				logger.Printf("exportMetric: executing query '%s' ending at timestamp %v", query, queryTS.Format(time.RFC3339))
 			} else {
-				log.Printf("exportMetric: batch %v/%v (to %v)", batch, batches, queryTS.Format(time.Stamp))
+				logger.Printf("exportMetric: batch %v/%v (to %v)", batch, batches, queryTS.Format(time.Stamp))
 			}
 			// TODO: Add support for overriding the timeout; remember it can only go *smaller*
 			value, _, err := promApi.Query(ctx, query, queryTS)
@@ -350,7 +378,7 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 				tooManySamples, _ := regexp.Match("query processing would load too many samples into memory", []byte(err.Error()))
 				if tooManySamples {
 					newBatchDur := time.Duration(batchDur.Nanoseconds() / 2)
-					log.Printf("exportMetric: too many samples in result set. Reducing batch size from %v to %v and trying again.", batchDur, newBatchDur)
+					logger.Printf("exportMetric: too many samples in result set. Reducing batch size from %v to %v and trying again.", batchDur, newBatchDur)
 					_, err := cleanFiles(filePrefix, fileNum, true)
 					fileNum = 0
 					if err != nil {
@@ -382,14 +410,14 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 					if err != nil {
 						batchErr := fmt.Errorf("batch write failed with '%w'", err)
 						if writeErrIsFatal(batchErr) {
-							log.Fatalf("exportMetric: %v, giving up", batchErr)
+							logger.Fatalf("exportMetric: %v, giving up", batchErr)
 						}
 						return 0, batchErr
 					}
 					fileNum++
 					values = make([]*model.SampleStream, 0, 0)
 				} else {
-					log.Println("exportMetric: no results for this query, skipping write")
+					logger.Println("exportMetric: no results for this query, skipping write")
 				}
 			}
 			// If this is the last batch, exit the outer loop
@@ -424,19 +452,19 @@ func createArchive(buf io.Writer) error {
 	case "none":
 		tw = tar.NewWriter(buf)
 	default:
-		log.Fatalf("unsupported compression type: %v ", *tarCompression)
+		logger.Fatalf("unsupported compression type: %v ", *tarCompression)
 		return nil
 
 	}
 	defer tw.Close()
-	log.Printf("createArchive: using tar compression format '%s'", *tarCompression)
+	logger.Printf("createArchive: using tar compression format '%s'", *tarCompression)
 
 	// Iterate over collectMetrics and add them to the tar archive
 	for _, v := range collectMetrics {
 		metricName, err := getMetricName(v)
 		for i := uint(0); i < v.fileCount; i++ {
 			if err != nil {
-				log.Fatalf("createArchive: %v", err)
+				logger.Fatalf("createArchive: %v", err)
 			}
 			filename := fmt.Sprintf("%s.%05d", metricName, i)
 			err = addToArchive(tw, filename)
@@ -457,6 +485,14 @@ func createArchive(buf io.Writer) error {
 
 		}
 
+	}
+
+	if *logToFile {
+		logger.Println("createArchive: adding log to tar file - bundled log will be truncated at this point!")
+		err := addToArchive(tw, *logFilename)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -561,34 +597,34 @@ func buildInstanceLabelString(instanceList string, nodeSet string) (string, erro
 		var nodes []string
 		for _, v := range fields {
 			if *debugLogging {
-				log.Printf("buildInstanceLabelString: found field '%v' in --nodes flag", v)
+				logger.Printf("buildInstanceLabelString: found field '%v' in --nodes flag", v)
 			}
 			rangeMatches := rangeRe.FindStringSubmatch(v)
 
 			if nodeNumRe.FindStringSubmatch(v) != nil {
 				// We'll hit this branch if we find an individual node number in a field
 				if *debugLogging {
-					log.Printf("buildInstanceLabelString: adding node n%v to the node list", v)
+					logger.Printf("buildInstanceLabelString: adding node n%v to the node list", v)
 				}
 				nodes = append(nodes, v)
 			} else if len(rangeMatches) == 3 {
 				// We'll hit this branch if we matched the range regular expression rangeRe above, e.g. 3-7
 				if *debugLogging {
-					log.Printf("buildInstanceLabelString: found matches '%v' in --nodes flag", rangeMatches)
+					logger.Printf("buildInstanceLabelString: found matches '%v' in --nodes flag", rangeMatches)
 				}
 				var low, high int
 				low, err = strconv.Atoi(rangeMatches[1])
 				high, err = strconv.Atoi(rangeMatches[2])
 				if low > high {
-					log.Printf("WARN: buildInstanceLabelString: found node range '%v' with min %v greater than max %v; swapping min and max and proceeding anyway", v, low, high)
+					logger.Printf("WARN: buildInstanceLabelString: found node range '%v' with min %v greater than max %v; swapping min and max and proceeding anyway", v, low, high)
 					low, high = high, low
 				}
 				if *debugLogging {
-					log.Printf("buildInstanceLabelString: parsed lower bound '%v' and upper bound '%v' in node range '%v'", low, high, v)
+					logger.Printf("buildInstanceLabelString: parsed lower bound '%v' and upper bound '%v' in node range '%v'", low, high, v)
 				}
 				for i := low; i <= high; i++ {
 					if *debugLogging {
-						log.Printf("buildInstanceLabelString: adding node n%v to the node list", i)
+						logger.Printf("buildInstanceLabelString: adding node n%v to the node list", i)
 					}
 					nodes = append(nodes, strconv.Itoa(i))
 				}
@@ -598,7 +634,7 @@ func buildInstanceLabelString(instanceList string, nodeSet string) (string, erro
 				return "", fmt.Errorf("unknown node specifier '%v' in --nodes flag", v)
 			}
 		}
-		log.Printf("buildInstanceLabelString: using node list %v", nodes)
+		logger.Printf("buildInstanceLabelString: using node list %v", nodes)
 		/*
 			As above, the extra | before the list of instance names is required so we capture certain metrics like "up"
 			that can't be relabeled and therefore do not have an exported_instance label. This may result in collecting
@@ -654,14 +690,14 @@ func setupYBAAPI(ctx context.Context) (*ywclient.APIClient, error) {
 		configuration.Scheme = "http"
 	}
 
-	log.Printf("Using hostname '%v' to connect to the YBA API", *ybaHostname)
+	logger.Printf("Using hostname '%v' to connect to the YBA API", *ybaHostname)
 
 	// Validate the provided YBA hostname by performing a hostname lookup on it. The behaviour of this lookup may
 	// vary by operating system. Discard the returned IP address list because we don't actually care what the IP is,
 	// only that hostname resolution succeeded.
 	_, err := net.LookupHost(*ybaHostname)
 	if err != nil {
-		log.Fatalf("YBA hostname lookup failed: %v", err)
+		logger.Fatalf("YBA hostname lookup failed: %v", err)
 	}
 	configuration.Host = *ybaHostname
 	configuration.Debug = *debugLogging
@@ -672,7 +708,7 @@ func setupYBAAPI(ctx context.Context) (*ywclient.APIClient, error) {
 
 func getCustomerUuid(ctx context.Context, client *ywclient.APIClient) (string, error) {
 	if *debugLogging {
-		log.Println("Making YBA API call ListOfCustomers")
+		logger.Println("Making YBA API call ListOfCustomers")
 	}
 	customers, r, err := client.CustomerManagementApi.ListOfCustomers(ctx).Execute()
 	if err != nil {
@@ -681,7 +717,7 @@ func getCustomerUuid(ctx context.Context, client *ywclient.APIClient) (string, e
 	defer func() {
 		err := r.Body.Close()
 		if err != nil {
-			log.Fatalf("getCustomerUuid: failed to close HTTP response body: %v", err)
+			logger.Fatalf("getCustomerUuid: failed to close HTTP response body: %v", err)
 		}
 	}()
 	// Status codes between 200 and 299 indicate success
@@ -701,7 +737,7 @@ func getCustomerUuid(ctx context.Context, client *ywclient.APIClient) (string, e
 	customer := customers[0]
 
 	if *debugLogging {
-		log.Printf("getCustomerUuid: found customer '%v' with UUID '%v'", customer.Name, *customer.Uuid)
+		logger.Printf("getCustomerUuid: found customer '%v' with UUID '%v'", customer.Name, *customer.Uuid)
 	}
 	return *customer.Uuid, nil
 }
@@ -714,7 +750,7 @@ func getUniverseList(ctx context.Context, client *ywclient.APIClient, cUuid stri
 	defer func() {
 		err := r.Body.Close()
 		if err != nil {
-			log.Fatalf("getUniverseList: failed to close HTTP response body: %v", err)
+			logger.Fatalf("getUniverseList: failed to close HTTP response body: %v", err)
 		}
 	}()
 	statusOK := r.StatusCode >= 200 && r.StatusCode < 300
@@ -739,7 +775,7 @@ func getUniverseByName(ctx context.Context, client *ywclient.APIClient, cUuid st
 	defer func() {
 		err := r.Body.Close()
 		if err != nil {
-			log.Fatalf("getUniverseByName: failed to close HTTP response body: %v", err)
+			logger.Fatalf("getUniverseByName: failed to close HTTP response body: %v", err)
 		}
 	}()
 	statusOK := r.StatusCode >= 200 && r.StatusCode < 300
@@ -802,7 +838,7 @@ func getUniverseByUuid(ctx context.Context, client *ywclient.APIClient, cUuid st
 	// crash the promdump utility. promdump is a short-lived process and the leaked socket will be cleaned up on
 	// exit anyway.
 	// defer r.Body.Close()
-	log.Printf("Found Universe '%v'", *universe.Name)
+	logger.Printf("Found Universe '%v'", *universe.Name)
 
 	return universe, nil
 }
@@ -812,7 +848,7 @@ func printUniverseList(universes []ywclient.UniverseResp) {
 	fmt.Println()
 	fmt.Printf("%4v\t%-36v\t%-30v\n", "#", "Universe UUID", "Universe Name")
 	fmt.Printf("%v\t%v\t%v\n", strings.Repeat("-", 4), strings.Repeat("-", 36), strings.Repeat("-", 30))
-	//log.Println("#   \tUniverse UUID                       \tUniverse Name")
+	//logger.Println("#   \tUniverse UUID                       \tUniverse Name")
 	//fmt.Println("----\t------------------------------------\t------------------------------")
 	for k, v := range universes {
 		fmt.Printf("%4v\t%v\t%v\n", k+1, *v.UniverseUUID, *v.Name)
@@ -823,6 +859,25 @@ func printUniverseList(universes []ywclient.UniverseResp) {
 func main() {
 	flag.Parse()
 
+	// Initialization of logging must be done *after* flags have been parsed, otherwise the log configuration flags
+	// will not yet be set.
+
+	// We need to open up the logfile outside initLogging(), otherwise a defer file.Close() will close the file
+	// as soon as the func returns.
+	var logFile *os.File
+	var err error
+	if *logToFile {
+		logFile, err = os.OpenFile(*logFilename, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0644)
+		if err != nil {
+			log.Printf("main: failed to open log file '%s': %v", *logFilename, err)
+			log.Printf("main: reverting to console logging")
+			*logToFile = false
+			*logToStderr = true
+		}
+		defer logFile.Close()
+	}
+	logger, _ = initLogging(logFile)
+
 	verString := fmt.Sprintf("promdump version %v from commit %v built %v\n", AppVersion, CommitHash, BuildTime)
 
 	if *version {
@@ -830,10 +885,38 @@ func main() {
 		os.Exit(0)
 	}
 
-	log.Printf(verString)
+	logger.Printf(verString)
+
+	var flagString strings.Builder
+	flagString.WriteString("main: using the following flags:")
+	flag.Visit(func(f *flag.Flag) {
+		for _, sensitiveFlagName := range sensitiveFlags {
+			if f.Name == sensitiveFlagName {
+				_, err := flagString.WriteString(fmt.Sprintf(" --%s=****", f.Name))
+				if err != nil {
+					logger.Printf("main: inexplicably failed to write while adding flag '--%s=****' to flag logging string: %v", f.Name, err)
+				}
+				// This func is called once per flag, so if we've found the flag in the list of sensitive flags, we're
+				// done and the func should return.
+				return
+			}
+		}
+
+		// If the flag name doesn't match any of the sensitive flags, we'll exit the for loop and log normally
+		_, err := flagString.WriteString(fmt.Sprintf(" --%s=%v", f.Name, f.Value))
+		if err != nil {
+			logger.Printf("main: inexplicably failed to write while adding flag '--%s=%v'' to flag logging string: %v", f.Name, f.Value, err)
+		}
+	})
+	// Write the complete flag string built by the string builder out to the log
+	logger.Println(flagString.String())
+
+	if *logToFile {
+		logger.Printf("main: logging to file '%s'", *logFilename)
+	}
 
 	if flag.NArg() > 0 {
-		log.Fatalf("Too many arguments: %v. Check for typos.", strings.Join(flag.Args(), " "))
+		logger.Fatalf("Too many arguments: %v. Check for typos.", strings.Join(flag.Args(), " "))
 	}
 
 	// Don't include ybaHostname in the list of flags that trigger YBA API mode because it has a default value
@@ -843,41 +926,41 @@ func main() {
 
 	if useYbaApi {
 		if *ybaToken == "" {
-			log.Fatalln("The --yba_api_token flag is required when using the YBA API. See the YBA API documentation at: https://api-docs.yugabyte.com/")
+			logger.Fatalln("The --yba_api_token flag is required when using the YBA API. See the YBA API documentation at: https://api-docs.yugabyte.com/")
 		}
 
 		// The customer has specified a node prefix and also a flag that activates YBA mode. This is not allowed.
 		if *nodePrefix != "" {
-			log.Fatalln("The --node_prefix flag is incompatible with the YBA API. Use --universe_name or --universe_uuid instead.")
+			logger.Fatalln("The --node_prefix flag is incompatible with the YBA API. Use --universe_name or --universe_uuid instead.")
 		}
 
 		if (*universeName == "" && *universeUuid == "") && !*listUniverses {
-			log.Fatalln("One of --universe_name or --universe_uuid must be specified when using the YBA API.")
+			logger.Fatalln("One of --universe_name or --universe_uuid must be specified when using the YBA API.")
 		}
 
 		if *universeName != "" && *universeUuid != "" {
-			log.Fatalln("The --universe_name and --universe_uuid flags are mutually exclusive.")
+			logger.Fatalln("The --universe_name and --universe_uuid flags are mutually exclusive.")
 		}
 
 		if *universeUuid != "" {
 			// fdb24ab4-0000-0000-0000-6763d1af32d9
 			isValidUuid, err := regexp.Match("^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", []byte(*universeUuid))
 			if err != nil {
-				log.Fatalf("Failed to validate --universe_uuid flag: %v", err)
+				logger.Fatalf("Failed to validate --universe_uuid flag: %v", err)
 			}
 			if !isValidUuid {
-				log.Fatalf("Invalid UUID in --universe_uuid flag. UUIDs must be hexadecimal digits and dashes in the format 'fdb24ab4-0000-0000-0000-6763d1af32d9'")
+				logger.Fatalf("Invalid UUID in --universe_uuid flag. UUIDs must be hexadecimal digits and dashes in the format 'fdb24ab4-0000-0000-0000-6763d1af32d9'")
 			}
 		}
 
 		if !*ybaTls {
-			log.Printf("Warning: Disabling TLS for YBA communication is insecure and not recommended!")
+			logger.Printf("Warning: Disabling TLS for YBA communication is insecure and not recommended!")
 		} else if *skipYbaHostVerification { // ybaTls is implicitly true here
 			// Only reached if TLS is enabled and skipYbaHostVerification is true
-			log.Println("Warning: Disabling YBA host verification is insecure and not recommended!")
+			logger.Println("Warning: Disabling YBA host verification is insecure and not recommended!")
 		}
 
-		log.Println("main: Connecting to YBA API")
+		logger.Println("main: Connecting to YBA API")
 
 		// Create a context with the YBA API token in it to pass into functions that make YBA API calls
 		ybaCtx := context.WithValue(context.Background(),
@@ -890,19 +973,19 @@ func main() {
 
 		ybaClient, err := setupYBAAPI(ybaCtx)
 		if err != nil {
-			log.Fatalf("Failed to initialize the YBA API: %v", err)
+			logger.Fatalf("Failed to initialize the YBA API: %v", err)
 		}
 
 		cUuid, err := getCustomerUuid(ybaCtx, ybaClient)
 		if err != nil {
-			log.Fatalf("Failed to retrieve customer UUID from YBA: %v", err)
+			logger.Fatalf("Failed to retrieve customer UUID from YBA: %v", err)
 		}
-		log.Printf("Found customer UUID '%v'", cUuid)
+		logger.Printf("Found customer UUID '%v'", cUuid)
 
 		if *listUniverses {
 			universes, err := getUniverseList(ybaCtx, ybaClient, cUuid)
 			if err != nil {
-				log.Fatalf("getUniverseList: failed with: %v", err)
+				logger.Fatalf("getUniverseList: failed with: %v", err)
 			}
 			printUniverseList(universes)
 			os.Exit(0)
@@ -910,43 +993,43 @@ func main() {
 
 		var universe ywclient.UniverseResp
 		if *universeName != "" {
-			log.Printf("Looking up Universe with name '%v' using the YBA API", *universeName)
+			logger.Printf("Looking up Universe with name '%v' using the YBA API", *universeName)
 			universe, err = getUniverseByName(ybaCtx, ybaClient, cUuid, *universeName)
 			if err != nil {
-				log.Printf("getUniverseByName: failed with: %v", err)
+				logger.Printf("getUniverseByName: failed with: %v", err)
 				universes, err := getUniverseList(ybaCtx, ybaClient, cUuid)
 				if err != nil {
-					log.Fatalf("getUniverseList: failed with: %v", err)
+					logger.Fatalf("getUniverseList: failed with: %v", err)
 				}
 				printUniverseList(universes)
-				log.Fatalf("Specify a Universe from the list above using --universe_uuid or --universe_name")
+				logger.Fatalf("Specify a Universe from the list above using --universe_uuid or --universe_name")
 			}
-			log.Printf("Found Universe '%v'", *universe.Name)
+			logger.Printf("Found Universe '%v'", *universe.Name)
 		} else if *universeUuid != "" {
-			log.Printf("Looking up Universe with UUID '%v' using the YBA API", *universeUuid)
+			logger.Printf("Looking up Universe with UUID '%v' using the YBA API", *universeUuid)
 			universe, err = getUniverseByUuid(ybaCtx, ybaClient, cUuid, *universeUuid)
 			if err != nil {
-				log.Printf("getUniverseByUuid: failed with: %v", err)
+				logger.Printf("getUniverseByUuid: failed with: %v", err)
 				universes, err := getUniverseList(ybaCtx, ybaClient, cUuid)
 				if err != nil {
-					log.Fatalf("getUniverseList: failed with: %v", err)
+					logger.Fatalf("getUniverseList: failed with: %v", err)
 				}
 				printUniverseList(universes)
-				log.Fatalf("Specify a Universe from the list above using --universe_uuid or --universe_name")
+				logger.Fatalf("Specify a Universe from the list above using --universe_uuid or --universe_name")
 			}
 		}
-		log.Printf("Found node prefix '%v' for Universe '%v'", *universe.UniverseDetails.NodePrefix, *universe.Name)
+		logger.Printf("Found node prefix '%v' for Universe '%v'", *universe.UniverseDetails.NodePrefix, *universe.Name)
 		*nodePrefix = *universe.UniverseDetails.NodePrefix
 		// Since we got the node prefix directly from YBA, we're going to assume it's correct and  turn validation OFF
 		*prefixValidation = false
 
-		log.Println("main: Finished with YBA API")
+		logger.Println("main: Finished with YBA API")
 	} else {
-		log.Printf("Warning: The --node_prefix flag is deprecated. It is recommended to provide a --yba_api_token and use --universe_name or --universe_uuid instead.")
+		logger.Printf("Warning: The --node_prefix flag is deprecated. It is recommended to provide a --yba_api_token and use --universe_name or --universe_uuid instead.")
 	}
 
 	if *nodePrefix == "" && *metric == "" {
-		log.Fatalln("Specify a universe by name or UUID (if collecting default Yugabyte metrics), a custom metric using --metric, or both.")
+		logger.Fatalln("Specify a universe by name or UUID (if collecting default Yugabyte metrics), a custom metric using --metric, or both.")
 	}
 
 	if *nodePrefix != "" && *prefixValidation {
@@ -954,13 +1037,13 @@ func main() {
 		validPrefixFormat, _ := regexp.Match("^yb-(?:dev|demo|stage|preprod|prod)-[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$", []byte(*nodePrefix))
 		// The node prefix must not end with a node number. This is a common error, so we check it specifically.
 		if prefixHasNodeNum {
-			log.Fatalf("Invalid --node_prefix value '%v'. Node prefix must not include a node number. Use --nodes or --instances to filter by node.", *nodePrefix)
+			logger.Fatalf("Invalid --node_prefix value '%v'. Node prefix must not include a node number. Use --nodes or --instances to filter by node.", *nodePrefix)
 		}
 		// If a node prefix is specified, it must begin with yb-, followed by the environment name and a valid
 		// Universe name. Universe names are limited to alphanumeric characters, plus dash. They must begin and end
 		// with an alphanumeric character.
 		if !validPrefixFormat {
-			log.Fatalf("Invalid --node_prefix value '%v'. Node prefixes must be in the format 'yb-<dev|demo|stage|preprod|prod>-<universe-name>', e.g. 'yb-prod-my-universe'.", *nodePrefix)
+			logger.Fatalf("Invalid --node_prefix value '%v'. Node prefixes must be in the format 'yb-<dev|demo|stage|preprod|prod>-<universe-name>', e.g. 'yb-prod-my-universe'.", *nodePrefix)
 		}
 	}
 
@@ -973,36 +1056,35 @@ func main() {
 				v.collect = false
 			}
 			if *nodePrefix == "" && *instanceList == "" && v.collect && v.requiresNodePrefix {
-				log.Fatalln("Specify a --node_prefix value or a --instances value, or remove any Yugabyte metric export collection flags (--master, --node, etc.)")
+				logger.Fatalln("Specify a --node_prefix value or a --instances value, or remove any Yugabyte metric export collection flags (--master, --node, etc.)")
 			}
 		}
 	}
 
 	if *metric != "" && *out == "" {
-		log.Fatalln("When specifying a custom --metric, output file prefix --out is required.")
+		logger.Fatalln("When specifying a custom --metric, output file prefix --out is required.")
 	}
 
 	if *instanceList != "" && *nodeSet != "" {
-		log.Fatalln("The --instances and --nodes flags are mutually exclusive.")
+		logger.Fatalln("The --instances and --nodes flags are mutually exclusive.")
 	}
 
 	var instanceLabelString string
-	var err error
 	instanceLabelString, err = buildInstanceLabelString(*instanceList, *nodeSet)
 	if err != nil {
 		if *instanceList != "" {
-			log.Fatalf("main: unable to build PromQL instance label: %v; verify that the --instances flag is correctly formatted", err)
+			logger.Fatalf("main: unable to build PromQL instance label: %v; verify that the --instances flag is correctly formatted", err)
 		} else if *nodeSet != "" {
-			log.Fatalf("main: unable to build PromQL instance label: %v; verify that the --nodes flag is correctly formatted", err)
+			logger.Fatalf("main: unable to build PromQL instance label: %v; verify that the --nodes flag is correctly formatted", err)
 		}
 	}
 	if instanceLabelString == "" {
-		log.Println("main: not filtering by exported_instance")
+		logger.Println("main: not filtering by exported_instance")
 	} else {
-		log.Printf("main: using exported_instance filter '%v'", instanceLabelString)
+		logger.Printf("main: using exported_instance filter '%v'", instanceLabelString)
 		// Toggle collection of platform metrics off by default if using an exported_instance filter
 		if !collectMetrics["platform"].changedFromDefault {
-			log.Printf("WARN: main: metrics collection has been filtered to specific nodes; disabling collection of platform metrics (specify --platform to re-enable)")
+			logger.Printf("WARN: main: metrics collection has been filtered to specific nodes; disabling collection of platform metrics (specify --platform to re-enable)")
 			collectMetrics["platform"].collect = false
 		}
 	}
@@ -1010,19 +1092,19 @@ func main() {
 	logMetricCollectorConfig()
 
 	if *startTime != "" && *endTime != "" && *periodDur != 0 {
-		log.Fatalln("main: too many time arguments; specify either --start_time and --end_time or a time and --period")
+		logger.Fatalln("main: too many time arguments; specify either --start_time and --end_time or a time and --period")
 	}
 
 	if *enableTar {
-		log.Printf("main: tar bundling enabled")
+		logger.Printf("main: tar bundling enabled")
 		if *tarFilename == "" {
 			// If filename is not provided, generate a default tar filename
 			*tarFilename = generateDefaultTarFilename()
-			log.Printf("main: no --tar_filename specified; using filename '%s'", *tarFilename)
+			logger.Printf("main: no --tar_filename specified; using filename '%s'", *tarFilename)
 		}
 		// Check if file with specified (or generated) filename already exists
 		if _, err := os.Stat(*tarFilename); err == nil {
-			log.Fatalf("specified --tar_filename '%s' already exists; please choose a different filename", *tarFilename)
+			logger.Fatalf("specified --tar_filename '%s' already exists; please choose a different filename", *tarFilename)
 		}
 	}
 
@@ -1030,23 +1112,23 @@ func main() {
 	// var err error - already declared above
 	beginTS, endTS, *periodDur, err = getRangeTimestamps(*startTime, *endTime, *periodDur)
 	if err != nil {
-		log.Fatalln("main: ", err)
+		logger.Fatalln("main: ", err)
 	}
 
 	// This check has moved below timestamp calculations because the period may now be a calculated value
 	if periodDur.Nanoseconds()%1e9 != 0 || batchDur.Nanoseconds()%1e9 != 0 {
-		log.Fatalln("main: --period and --batch must not have fractional seconds")
+		logger.Fatalln("main: --period and --batch must not have fractional seconds")
 	}
 	if *batchDur > *periodDur {
 		batchDur = periodDur
 	}
 
-	log.Printf("main: Beginning metric collection against Prometheus endpoint '%v'", *baseURL)
+	logger.Printf("main: Beginning metric collection against Prometheus endpoint '%v'", *baseURL)
 
 	ctx := context.Background()
 	promApi, err := setupPromAPI(ctx)
 	if err != nil {
-		log.Fatalln("setupPromAPI: ", err)
+		logger.Fatalln("setupPromAPI: ", err)
 	}
 
 	checkPrefixes := make([]string, 0, len(collectMetrics))
@@ -1059,7 +1141,7 @@ func main() {
 		for _, v := range collectMetrics {
 			metricName, err := getMetricName(v)
 			if err != nil {
-				log.Fatalf("main: %v", err)
+				logger.Fatalf("main: %v", err)
 			}
 			checkPrefixes = append(checkPrefixes, metricName)
 		}
@@ -1068,7 +1150,7 @@ func main() {
 	for _, prefix := range checkPrefixes {
 		conflict, err := hasConflictingFiles(prefix)
 		if err != nil {
-			log.Fatalf("main: checking for existing export files with file prefix %v failed with error: %v", prefix, err)
+			logger.Fatalf("main: checking for existing export files with file prefix %v failed with error: %v", prefix, err)
 		}
 		if conflict {
 			conflictPrefixes = append(conflictPrefixes, prefix+".*")
@@ -1076,7 +1158,7 @@ func main() {
 	}
 	if len(conflictPrefixes) > 0 {
 		sort.Strings(conflictPrefixes)
-		log.Fatalf("main: found existing export files with file prefix(es): %v; move any existing export files aside before proceeding", strings.Join(conflictPrefixes, " "))
+		logger.Fatalf("main: found existing export files with file prefix(es): %v; move any existing export files aside before proceeding", strings.Join(conflictPrefixes, " "))
 	}
 
 	// TODO: DRY this out
@@ -1085,7 +1167,7 @@ func main() {
 		if v.collect {
 			metricName, err := getMetricName(v)
 			if err != nil {
-				log.Fatalf("main: %v", err)
+				logger.Fatalf("main: %v", err)
 			}
 
 			var ybMetric string
@@ -1117,7 +1199,7 @@ func main() {
 			v.fileCount, err = exportMetric(ctx, promApi, ybMetric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, metricName)
 
 			if err != nil {
-				log.Printf("exportMetric: export of metric %v failed with error %v; moving to next metric", metricName, err)
+				logger.Printf("exportMetric: export of metric %v failed with error %v; moving to next metric", metricName, err)
 				continue
 			}
 		}
@@ -1125,43 +1207,48 @@ func main() {
 	if *metric != "" {
 		customMetricCount, err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
 		if err != nil {
-			log.Fatalln("exportMetric:", err)
+			logger.Fatalln("exportMetric:", err)
 		}
 	}
-	log.Println("main: Finished with Prometheus connection")
+	logger.Println("main: Finished with Prometheus connection")
 
 	if *enableTar {
 		tarFileOut, err := os.Create(*tarFilename)
 		if err != nil {
-			log.Fatalf("Error writing archive: %v (File: %v)\n", err, *tarFilename)
+			logger.Fatalf("Error writing archive: %v (File: %v)\n", err, *tarFilename)
 		}
 
 		// Create the archive
-		log.Printf("main: creating tar archive of metric export files")
+		logger.Printf("main: creating tar archive of metric export files")
+		// Forcibly flush the log file before tarring
+		err = logFile.Sync()
+		if err != nil {
+			logger.Printf("main: failed to flush log file '%s' to disk: %v", *logFilename, err)
+		}
 		err = createArchive(tarFileOut)
 		if err != nil {
-			log.Fatalf("Error creating archive: %v\n", err)
+			logger.Fatalf("Error creating archive: %v\n", err)
 		}
 		// cleaning files
 		if !*keepFiles {
-			log.Println("main: tar archive created successfully; cleaning metric export files")
+			logger.Println("main: tar archive created successfully; cleaning metric export files")
 			for _, v := range collectMetrics {
 				v := v
 				metricName, err := getMetricName(v)
 				if err != nil {
-					log.Printf("could not retrieve metric name for metric v: %v", err)
+					logger.Printf("could not retrieve metric name for metric v: %v", err)
 				}
 				if v.collect {
 					_, err := cleanFiles(metricName, v.fileCount, false)
 					if err != nil {
-						log.Printf("Error cleaning files : %v", err)
+						logger.Printf("Error cleaning files : %v", err)
 					}
 				}
 			}
 		} else {
-			log.Println("main: preserving metric export files because the --keep_files flag is set")
+			logger.Println("main: preserving metric export files because the --keep_files flag is set")
 		}
 
-		log.Printf("main: finished creating metrics bundle '%s'", *tarFilename)
+		logger.Printf("main: finished creating metrics bundle '%s'", *tarFilename)
 	}
 }
