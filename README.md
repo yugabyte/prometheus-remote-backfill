@@ -76,9 +76,12 @@ Flags in this section are of the "print something and exit" variety.
 
 Flags in this section control the logging behaviour of the utility.
 
-| Canonical Flag Name | Alias(es) | Added In | Default | Required? | Description            |
-|---------------------|-----------|----------|---------|-----------|------------------------|
-| `--debug`           |           | v0.1.3   | `false` | Optional  | Enables debug logging. |
+| Canonical Flag Name | Alias(es) | Added In | Default        | Required? | Description                                                                                   |
+|---------------------|-----------|----------|----------------|-----------|-----------------------------------------------------------------------------------------------|
+| `--debug`           |           | v0.1.3   | `false`        | Optional  | Enables debug logging.                                                                        |
+| `--log_to_console`  |           | v0.5.2   | `true`         | Optional  | Write log messages to the console.                                                            |
+| `--log_to_file`     |           | v0.5.2   | `true`         | Optional  | Write log messages to a log file.                                                             |
+| `--log_filename`    |           | v0.5.2   | `promdump.log` | Optional  | Specifies the name of the file to which to write log messages when `--log_to_file` is `true`. |
 
 ### Prometheus Flags
 
