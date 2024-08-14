@@ -35,21 +35,21 @@ func TestGetMetricName(t *testing.T) {
 
 	testMetric := testMetrics["emptymetric"]
 	// presence of one of exportName or jobName must be enforced
-	metricName, err := getMetricName(testMetric)
+	_, err := getMetricName(testMetric)
 	if err == nil {
 		t.Errorf("getMetricName(%+v) must return an error when neither exportName and jobName are present", testMetric)
 	}
 
 	testMetric = testMetrics["badmetric"]
 	// mutual exclusivity of exportName and jobName must be enforced
-	metricName, err = getMetricName(testMetric)
+	_, err = getMetricName(testMetric)
 	if err == nil {
 		t.Errorf("getMetricName(%+v) must return an error when both exportName and jobName are present", testMetric)
 	}
 
 	testMetric = testMetrics["exporter"]
 	// getMetricName must return the export name for exporter metrics
-	metricName, err = getMetricName(testMetric)
+	metricName, err := getMetricName(testMetric)
 	if metricName != "exporter_export" {
 		t.Errorf("getMetricName(%+v) must return the name of the export", testMetric)
 	}
