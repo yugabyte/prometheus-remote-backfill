@@ -107,6 +107,10 @@ var (
 	customMetricCount uint // Holds custom metric file counts
 	logger            *log.Logger
 
+	// We'll refer to time.Now using this variable so that we can swap it out for a static time in the test suite
+	// as needed.
+	now = time.Now
+
 	AppVersion = "DEV BUILD"
 	CommitHash = "POPULATED_BY_BUILD"
 	BuildTime  = "POPULATED_BY_BUILD"
@@ -255,7 +259,7 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 
 	// If neither the start time nor end time are specified, use the default end time for backward compatibility
 	if startTime == "" && endTime == "" {
-		endTS = time.Now()
+		endTS = now()
 	}
 
 	// Parse any provided time strings into Go times
@@ -291,7 +295,7 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 		endTS = startTS.Add(period)
 	}
 
-	if startTS.After(time.Now()) {
+	if startTS.After(now()) {
 		return badTime, badTime, 0, errors.New("start time must be in the past")
 	}
 
@@ -300,8 +304,8 @@ func getRangeTimestamps(startTime string, endTime string, period time.Duration) 
 	}
 
 	// Don't query past the current time because that would be dumb
-	if endTS.After(time.Now()) {
-		curTS := time.Now()
+	if endTS.After(now()) {
+		curTS := now()
 		logger.Printf("getRangeTimestamps: end time %v is after current time %v; setting end time to %v and recalculating period", endTS.Format(time.RFC3339), curTS.Format(time.RFC3339), curTS.Format(time.RFC3339))
 		endTS = curTS
 		/*
@@ -535,13 +539,13 @@ func addToArchive(tw *tar.Writer, filename string) error {
 func generateDefaultTarFilename() string {
 	switch *tarCompression {
 	case "gzip":
-		return fmt.Sprintf("promdump-%s-%s.tar.gz", *nodePrefix, time.Now().Format("20060102-150405")) // Format: YYYYMMDD-HHMMSS
+		return fmt.Sprintf("promdump-%s-%s.tar.gz", *nodePrefix, now().Format("20060102-150405")) // Format: YYYYMMDD-HHMMSS
 	case "bzip2":
-		return fmt.Sprintf("promdump-%s-%s.tar.bz2", *nodePrefix, time.Now().Format("20060102-150405"))
+		return fmt.Sprintf("promdump-%s-%s.tar.bz2", *nodePrefix, now().Format("20060102-150405"))
 
 	}
 
-	return fmt.Sprintf("promdump-%s-%s.tar", *nodePrefix, time.Now().Format("20060102-150405"))
+	return fmt.Sprintf("promdump-%s-%s.tar", *nodePrefix, now().Format("20060102-150405"))
 }
 
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
