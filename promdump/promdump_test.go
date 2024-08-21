@@ -23,149 +23,177 @@ func freezeTime() {
 	}
 }
 
+type testMetric struct {
+	testParams     promExport
+	testErr        bool
+	testReturn     bool
+	expectedReturn string
+	errStr         string
+}
+
 func TestGetMetricName(t *testing.T) {
 	setupLogging()
 
-	testMetrics := map[string]*promExport{
-		"emptymetric": {collect: true, changedFromDefault: false, requiresNodePrefix: false},
-		"exporter":    {exportName: "exporter_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
-		"jobmetric":   {jobName: "jobmetric", collect: true, changedFromDefault: false, requiresNodePrefix: false},
-		"badmetric":   {exportName: "badmetric_export", jobName: "badmetric", collect: true, changedFromDefault: false, requiresNodePrefix: true},
+	testMetrics := map[string]*testMetric{
+		"emptymetric": {
+			testParams: promExport{collect: true, changedFromDefault: false, requiresNodePrefix: false},
+			testErr:    true,
+			errStr:     "must return an error when neither exportName nor jobName are present",
+		},
+		"exporter": {
+			testParams:     promExport{exportName: "exporter_export", collect: true, changedFromDefault: false, requiresNodePrefix: true},
+			testReturn:     true,
+			expectedReturn: "exporter_export",
+			errStr:         "must return the name of the export when specified",
+		},
+		"jobmetric": {
+			testParams:     promExport{jobName: "jobmetric", collect: true, changedFromDefault: false, requiresNodePrefix: false},
+			testReturn:     true,
+			expectedReturn: "jobmetric",
+			errStr:         "must return the name of the job when specified",
+		},
+		"badmetric": {
+			testParams: promExport{exportName: "badmetric_export", jobName: "badmetric", collect: true, changedFromDefault: false, requiresNodePrefix: true},
+			testErr:    true,
+			errStr:     "must return an error when both exportName and jobName are present",
+		},
 	}
 
-	testMetric := testMetrics["emptymetric"]
-	// presence of one of exportName or jobName must be enforced
-	_, err := getMetricName(testMetric)
-	if err == nil {
-		t.Errorf("getMetricName(%+v) must return an error when neither exportName and jobName are present", testMetric)
-	}
+	for testName, testMetric := range testMetrics {
+		if (!testMetric.testErr && !testMetric.testReturn) || (testMetric.testErr && testMetric.testReturn) {
+			t.Errorf("TestGetMetricName: bad test configuration in test '%v': tests must have exactly one test condition", testName)
+		}
+		metricName, err := getMetricName(&testMetric.testParams)
+		if testMetric.testErr && err == nil {
+			t.Errorf("getMetricName(%+v) %v", testMetric.testParams, testMetric.errStr)
+		}
+		// If we're not testing for errors and we got an error, that's a problem
+		if !testMetric.testErr && err != nil {
+			t.Errorf("getMetricName(%v) unexpectedly returned an error %v", testMetric.testParams, err)
+		}
 
-	testMetric = testMetrics["badmetric"]
-	// mutual exclusivity of exportName and jobName must be enforced
-	_, err = getMetricName(testMetric)
-	if err == nil {
-		t.Errorf("getMetricName(%+v) must return an error when both exportName and jobName are present", testMetric)
-	}
-
-	testMetric = testMetrics["exporter"]
-	// getMetricName must return the export name for exporter metrics
-	metricName, err := getMetricName(testMetric)
-	if metricName != "exporter_export" {
-		t.Errorf("getMetricName(%+v) must return the name of the export", testMetric)
-	}
-
-	testMetric = testMetrics["jobmetric"]
-	// getMetricName must return the job name for job metrics
-	metricName, err = getMetricName(testMetric)
-	if metricName != "jobmetric" {
-		t.Errorf("getMetricName(%+v) must return the name of the job", testMetric)
+		if testMetric.testReturn && metricName != testMetric.expectedReturn {
+			t.Errorf("getMetricName(%+v) %v", testMetric.testParams, testMetric.errStr)
+		}
 	}
 }
 
-type testTime struct {
+type timeTestParams struct {
 	startTime string
 	endTime   string
 	period    time.Duration
 }
 
+type testTime struct {
+	testParams timeTestParams
+	testErr    bool
+	testReturn bool
+	// Expected values are all pointers because this simplifies the control flow. We can check whether the pointer is
+	// nil and if it is, skip checking the value. If we didn't do this, we'd have to use bools or some other mechanism
+	// to control the checks or instantiate empty objects for comparison.
+	expectedStartTs *time.Time
+	expectedEndTs   *time.Time
+	expectedPeriod  *time.Duration
+	errStr          string
+}
+
 func TestGetRangeTimestamps(t *testing.T) {
 	setupLogging()
 	freezeTime()
+	// In order to use the value from the now() func in a struct such as our test structs below, we need to evaluate it first
+	currentTs := now()
 
 	testTimes := map[string]*testTime{
-		"noTime":          {},
-		"periodButNoTime": {period: defaultPeriod},
-		"futureEndTime":   {endTime: now().Add(10 * time.Minute).Format(time.RFC3339)},
-		"futureTime":      {startTime: "2037-01-01T00:00:00Z", endTime: "2037-01-01T01:23:45Z"},
-		"reversedTime":    {startTime: "2024-07-16T18:00:00Z", endTime: "2024-07-15T14:30:00Z"},
-		"startEndOnly":    {startTime: "2024-07-14T14:30:00Z", endTime: "2024-07-14T18:00:00Z"},
-		"startPeriodOnly": {startTime: "2024-07-14T11:50:00Z", period: 15 * time.Minute},
-		"endPeriodOnly":   {endTime: "2024-07-14T18:00:00Z", period: 4 * time.Hour},
-		"tooManyTimes":    {startTime: "2024-07-15T12:34:56Z", endTime: "2024-07-15T12:45:36Z", period: 3 * 24 * time.Hour},
+		"noTime": {
+			testParams:    timeTestParams{},
+			testReturn:    true,
+			expectedEndTs: &currentTs,
+			errStr:        "should return an end timestamp of now if no start time or end time are specified",
+		},
+		"periodButNoTime": {
+			testParams:    timeTestParams{period: defaultPeriod},
+			testReturn:    true,
+			expectedEndTs: &currentTs,
+			errStr:        "should return an end timestamp of now if no start time or end time are specified",
+		},
+		// TODO: Add tests for parsing startTime and endTime? Might be challenging to implement in a way that does a meaningful test
+		"futureEndTime": {
+			testParams:    timeTestParams{endTime: now().Add(10 * time.Minute).Format(time.RFC3339)},
+			testReturn:    true,
+			expectedEndTs: &currentTs,
+			errStr:        "should return an end timestamp of now if the end time is from the future",
+		},
+		"futureTime": {
+			testParams: timeTestParams{startTime: "2037-01-01T00:00:00Z", endTime: "2037-01-01T01:23:45Z"},
+			testErr:    true,
+			errStr:     "must return an error when startTime is in the future",
+		},
+		"reversedTime": {
+			testParams: timeTestParams{startTime: "2024-07-16T18:00:00Z", endTime: "2024-07-15T14:30:00Z"},
+			testErr:    true,
+			errStr:     "must return an error when startTime is after endTime",
+		},
+		"startEndOnly": {
+			testParams: timeTestParams{startTime: "2024-07-14T14:30:00Z", endTime: "2024-07-14T18:00:00Z"},
+			testReturn: true,
+			// Has to be set later because it needs to be a pointer
+			// expectedPeriod: 3*time.Hour + 30*time.Minute
+			errStr: "should return a period that is the difference between end time and start time",
+		},
+		"startPeriodOnly": {
+			testParams: timeTestParams{startTime: "2024-07-14T11:50:00Z", period: 15 * time.Minute},
+			testReturn: true,
+			// Has to be set later because it needs to be a pointer
+			// expectedEndTs: time.Parse(time.RFC3339, "2024-07-14T12:05:00Z"),
+			errStr: "should return an end timestamp that is the start time plus the period",
+		},
+		"endPeriodOnly": {
+			testParams: timeTestParams{endTime: "2024-07-14T18:00:00Z", period: 4 * time.Hour},
+			testReturn: true,
+			// Has to be set later because it needs to be a pointer
+			// expectedStartTs: time.Parse(time.RFC3339, "2024-07-14T14:00:00Z")
+			errStr: "should return a start timestamp that is the end time minus the period",
+		},
+		"tooManyTimes": {
+			testParams: timeTestParams{startTime: "2024-07-15T12:34:56Z", endTime: "2024-07-15T12:45:36Z", period: 3 * 24 * time.Hour},
+			testErr:    true,
+			errStr:     "must return an error when all of startTime, endTime, and period are specified",
+		},
 	}
 
-	// at most two of startTime, endTime, and period can be specified
-	ts := testTimes["tooManyTimes"]
-	_, _, _, err := getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if err == nil {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) must return an error when all of startTime, endTime, and period are specified", ts.startTime, ts.endTime, ts.period)
-	}
+	startEndOnlyPeriod := 3*time.Hour + 30*time.Minute
+	testTimes["startEndOnly"].expectedPeriod = &startEndOnlyPeriod
 
-	// endTime should default to now if neither the start time nor end time are specified
-	ts = testTimes["noTime"]
-	_, testTs, _, err := getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if testTs != now() {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) should return an end timestamp of now if no start time or end time are specified; expected %v got %v", ts.startTime, ts.endTime, ts.period, now(), testTs)
-	}
+	startPeriodOnlyEndTs, _ := time.Parse(time.RFC3339, "2024-07-14T12:05:00Z")
+	testTimes["startPeriodOnly"].expectedEndTs = &startPeriodOnlyEndTs
 
-	// endTime should default to now if only the period is specified
-	ts = testTimes["periodButNoTime"]
-	_, testTs, _, err = getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if testTs != now() {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) should return an end timestamp of now if no start time or end time are specified; expected %v got %v", ts.startTime, ts.endTime, ts.period, now(), testTs)
-	}
+	endPeriodOnlyStartTs, _ := time.Parse(time.RFC3339, "2024-07-14T14:00:00Z")
+	testTimes["endPeriodOnly"].expectedStartTs = &endPeriodOnlyStartTs
 
-	// TODO: Add tests for parsing startTime and endTime? Might be challenging to implement in a way that does a meaningful test
+	for testName, testTime := range testTimes {
+		if (!testTime.testErr && !testTime.testReturn) || (testTime.testErr && testTime.testReturn) {
+			t.Errorf("TestGetRangeTimestamps: bad test configuration in test '%v': tests must have exactly one test condition", testName)
+		}
+		params := testTime.testParams
+		startTs, endTs, period, err := getRangeTimestamps(params.startTime, params.endTime, params.period)
+		// Run tests for errors
+		if testTime.testErr && err == nil {
+			t.Errorf("getRangeTimestamps(%v, %v, %v) %v", params.startTime, params.endTime, params.period, testTime.errStr)
+		}
+		// If we're not testing for errors and we got an error, that's a problem
+		if !testTime.testErr && err != nil {
+			t.Errorf("getRangeTimestamps(%v, %v, %v) unexpectedly returned an error %v", params.startTime, params.endTime, params.period, err)
+		}
 
-	// When both start time and end time are specified, the period is the difference between the two
-	ts = testTimes["startEndOnly"]
-	expectedPeriod := 3*time.Hour + 30*time.Minute
-	_, _, period, _ := getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if period != expectedPeriod {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) should return a period that is the difference between end time %v and start time %v; expected %v got %v", ts.startTime, ts.endTime, ts.period, ts.endTime, ts.startTime, expectedPeriod, period)
-	}
-
-	// When none of start time, end time, or period are specified, the period should be the default period
-	ts = testTimes["noTime"]
-	_, _, period, _ = getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if period != defaultPeriod {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) should return the default period when no parameters are specified; expected %v got %v", ts.startTime, ts.endTime, ts.period, defaultPeriod, period)
-	}
-
-	// When we have the period and one time stamp, test whether the other time stamp is calculated correctly
-	// One test for calculating end time
-	ts = testTimes["startPeriodOnly"] // 15 minutes after 2024-07-14T11:50:00Z should be 2024-07-14T12:05:00Z
-	_, testTs, _, err = getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if err != nil {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) unexpectedly returned an error %v", ts.startTime, ts.endTime, ts.period, err)
-	}
-	rightTs, _ := time.Parse(time.RFC3339, "2024-07-14T12:05:00Z")
-	if testTs != rightTs {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) should return an end timestamp that is the start time plus the period; expected %v got %v", ts.startTime, ts.endTime, ts.period, rightTs, testTs)
-	}
-
-	// One test for calculating start time
-	ts = testTimes["endPeriodOnly"] // 4 hours before 2024-07-14T18:00:00Z should be 2024-07-14T14:00:00Z
-	testTs, _, _, _ = getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if err != nil {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) unexpectedly returned an error %v", ts.startTime, ts.endTime, ts.period, err)
-	}
-	rightTs, _ = time.Parse(time.RFC3339, "2024-07-14T14:00:00Z")
-	if testTs != rightTs {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) should return a start timestamp that is the end time minus the period; expected %v got %v", ts.startTime, ts.endTime, ts.period, rightTs, testTs)
-	}
-
-	ts = testTimes["futureTime"]
-	// startTime must be in the past
-	// This will break in 2037 but I desperately hope promdump is not still in use by then
-	_, _, _, err = getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if err == nil {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) must return an error when startTime is in the future; expected %v < %v", ts.startTime, ts.endTime, ts.period, ts.startTime, now().Format(time.RFC3339))
-	}
-
-	ts = testTimes["reversedTime"]
-	// startTime must be before endTime
-	_, _, _, err = getRangeTimestamps(ts.startTime, ts.endTime, ts.period)
-	if err == nil {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) must return an error when startTime is after endTime; expected %v < %v", ts.startTime, ts.endTime, ts.period, ts.startTime, ts.endTime)
-	}
-
-	// TODO: This test is entangled with the period calculation tests startEndOnly and noTime. Disentangle these.
-	// end timestamp should be set to now if it's a time from the future
-	// set the end time to now (using the testing version of now()) + 10 minutes
-	beyondJourneysEndTime := testTime{endTime: now().Add(10 * time.Minute).Format(time.RFC3339)}
-	_, testTs, _, err = getRangeTimestamps(beyondJourneysEndTime.startTime, beyondJourneysEndTime.endTime, beyondJourneysEndTime.period)
-	if !testTs.Equal(now()) {
-		t.Errorf("getRangeTimestamps(%v, %v, %v) should return an end timestamp of now if the end time is from the future; expected %v got %v", beyondJourneysEndTime.startTime, beyondJourneysEndTime.endTime, beyondJourneysEndTime.period, now(), testTs)
+		// Run tests for return values
+		if testTime.expectedStartTs != nil && startTs != *testTime.expectedStartTs {
+			t.Errorf("getRangeTimestamps(%v, %v, %v) %v; expected %v got %v", params.startTime, params.endTime, params.period, testTime.errStr, *testTime.expectedStartTs, startTs)
+		}
+		if testTime.expectedEndTs != nil && endTs != *testTime.expectedEndTs {
+			t.Errorf("getRangeTimestamps(%v, %v, %v) %v; expected %v got %v", params.startTime, params.endTime, params.period, testTime.errStr, *testTime.expectedEndTs, endTs)
+		}
+		if testTime.expectedPeriod != nil && period != *testTime.expectedPeriod {
+			t.Errorf("getRangeTimestamps(%v, %v, %v) %v; expected %v got %v", params.startTime, params.endTime, params.period, testTime.errStr, *testTime.expectedPeriod, period)
+		}
 	}
 }
