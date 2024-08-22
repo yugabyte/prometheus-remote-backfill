@@ -1028,7 +1028,7 @@ func main() {
 		*prefixValidation = false
 
 		logger.Println("main: Finished with YBA API")
-	} else {
+	} else if *nodePrefix != "" {
 		logger.Printf("Warning: The --node_prefix flag is deprecated. It is recommended to provide a --yba_api_token and use --universe_name or --universe_uuid instead.")
 	}
 
