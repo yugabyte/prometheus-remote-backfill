@@ -21,6 +21,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,13 +56,16 @@ var (
 	defaultBaseUrl = fmt.Sprintf("http://%v:%v", defaultYbaHostname, defaultPromPort)
 
 	// Also see init() below for aliases
-	logToFile                = flag.Bool("log_to_file", true, "write log output to file")
-	logToStderr              = flag.Bool("log_to_console", true, "write log output to console (on standard error)")
-	logFilename              = flag.String("log_filename", "promdump.log", "if logging to disk is enabled, write logs to this file")
-	debugLogging             = flag.Bool("debug", false, "enable additional debug logging")
-	version                  = flag.Bool("version", false, "prints the promdump version and exits")
-	listUniverses            = flag.Bool("list_universes", false, "prints the list of Universes known to YBA and exits; requires a --yba_api_token")
+	logToFile     = flag.Bool("log_to_file", true, "write log output to file")
+	logToStderr   = flag.Bool("log_to_console", true, "write log output to console (on standard error)")
+	logFilename   = flag.String("log_filename", "promdump.log", "if logging to disk is enabled, write logs to this file")
+	debugLogging  = flag.Bool("debug", false, "enable additional debug logging")
+	version       = flag.Bool("version", false, "prints the promdump version and exits")
+	listUniverses = flag.Bool("list_universes", false, "prints the list of Universes known to YBA and exits; requires a --yba_api_token")
+	// The baseURL variable will report that it is unused because we're parsing the flag value directly into the
+	// parsedURL variable below.
 	baseURL                  = flag.String("url", defaultBaseUrl, "URL for Prometheus server API")
+	parsedURL                *url.URL
 	skipPromHostVerification = flag.Bool("skip_prometheus_host_verification", false, "bypasses TLS certificate verification for Prometheus queries (insecure)")
 	promApiTimeout           = flag.Duration("prometheus_api_timeout", 10, "the HTTP timeout to use for Prometheus API calls, in seconds (optional)")
 	startTime                = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
@@ -650,7 +654,7 @@ func buildInstanceLabelString(instanceList string, nodeSet string) (string, erro
 	return instanceLabelString, nil
 }
 
-func setupPromAPI(ctx context.Context) (v1.API, error) {
+func setupPromAPI(ctx context.Context, promURL url.URL) (v1.API, error) {
 	tlsCc := &tls.Config{
 		InsecureSkipVerify: *skipPromHostVerification,
 	}
@@ -664,7 +668,7 @@ func setupPromAPI(ctx context.Context) (v1.API, error) {
 		Transport: tr,
 	}
 
-	apiClient, err := api.NewClient(api.Config{Address: *baseURL, Client: httpClient})
+	apiClient, err := api.NewClient(api.Config{Address: promURL.String(), Client: httpClient})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Prometheus API client: %w", err)
 	}
@@ -906,10 +910,24 @@ func main() {
 			}
 		}
 
+		// If this is the --url flag, it may have a password in it that we need to redact
+		if f.Name == "url" {
+			// parsedURL is global!! We don't want to have to parse in more than one place.
+			parsedURL, err = url.Parse(f.Value.String())
+			if err != nil {
+				logger.Printf("main: failed to parse flag '--url=%v' while logging flags: %v", f.Value, err)
+			}
+			_, err = flagString.WriteString(fmt.Sprintf(" --%s=%v", f.Name, parsedURL.Redacted()))
+			if err != nil {
+				logger.Printf("main: inexplicably failed to write while adding flag '--%s=%v' to flag logging string: %v", f.Name, parsedURL.Redacted(), err)
+			}
+			return
+		}
+
 		// If the flag name doesn't match any of the sensitive flags, we'll exit the for loop and log normally
 		_, err := flagString.WriteString(fmt.Sprintf(" --%s=%v", f.Name, f.Value))
 		if err != nil {
-			logger.Printf("main: inexplicably failed to write while adding flag '--%s=%v'' to flag logging string: %v", f.Name, f.Value, err)
+			logger.Printf("main: inexplicably failed to write while adding flag '--%s=%v' to flag logging string: %v", f.Name, f.Value, err)
 		}
 	})
 	// Write the complete flag string built by the string builder out to the log
@@ -1127,10 +1145,11 @@ func main() {
 		batchDur = periodDur
 	}
 
-	logger.Printf("main: Beginning metric collection against Prometheus endpoint '%v'", *baseURL)
+	// parsedURL is global! The URL is parsed from a string into an actual URL object during flag logging
+	logger.Printf("main: Beginning metric collection against Prometheus endpoint '%v'", parsedURL.Redacted())
 
 	ctx := context.Background()
-	promApi, err := setupPromAPI(ctx)
+	promApi, err := setupPromAPI(ctx, *parsedURL)
 	if err != nil {
 		logger.Fatalln("setupPromAPI: ", err)
 	}
