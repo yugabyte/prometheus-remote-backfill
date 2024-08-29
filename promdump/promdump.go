@@ -49,6 +49,7 @@ type promExport struct {
 	collect            bool
 	changedFromDefault bool
 	requiresNodePrefix bool
+	dumpSuccessful     bool
 	fileCount          uint
 }
 
@@ -1188,6 +1189,8 @@ func main() {
 	// Loop through yb metrics list and export each metric according to its configuration
 	for _, v := range collectMetrics {
 		if v.collect {
+			// Mark the metric as not successfully dumped yet
+			v.dumpSuccessful = false
 			metricName, err := getMetricName(v)
 			if err != nil {
 				logger.Fatalf("main: %v", err)
@@ -1225,6 +1228,8 @@ func main() {
 				logger.Printf("exportMetric: export of metric %v failed with error %v; moving to next metric", metricName, err)
 				continue
 			}
+			// If we reach this point, the dump of all batches for this metric was successful
+			v.dumpSuccessful = true
 		}
 	}
 	if *metric != "" {
@@ -1234,6 +1239,28 @@ func main() {
 		}
 	}
 	logger.Println("main: Finished with Prometheus connection")
+
+	// TODO: Put this in a func?
+	skippedMetrics := 0
+	successfulMetrics := 0
+	failedMetrics := 0
+	for _, v := range collectMetrics {
+		if v.collect {
+			if v.dumpSuccessful {
+				successfulMetrics += 1
+			} else {
+				failedMetrics += 1
+			}
+		} else {
+			skippedMetrics += 1
+		}
+	}
+	logger.Printf("main: summary: %v metrics processed (skipped: %v dumped: %v failed: %v)", len(collectMetrics), skippedMetrics, successfulMetrics, failedMetrics)
+	if successfulMetrics < 1 {
+		logger.Fatalf("main: no metrics were dumped successfully; aborting")
+	} else if failedMetrics > 0 {
+		logger.Println("Warning: one or more metric exports failed; dump is incomplete")
+	}
 
 	if *enableTar {
 		tarFileOut, err := os.Create(*tarFilename)
@@ -1273,5 +1300,11 @@ func main() {
 		}
 
 		logger.Printf("main: finished creating metrics bundle '%s'", *tarFilename)
+	}
+	if failedMetrics > 0 {
+		// Yes, this is logged twice but it's important! It's logged the first time so it shows up unambiguously
+		// in the log that's included in the tarball and the second time so it's the last line of the output where
+		// customers and support are likely to see it.
+		logger.Println("Warning: one or more metric exports failed; dump is incomplete")
 	}
 }
