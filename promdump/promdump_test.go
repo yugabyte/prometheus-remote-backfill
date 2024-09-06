@@ -197,3 +197,112 @@ func TestGetRangeTimestamps(t *testing.T) {
 		}
 	}
 }
+
+type backoffTestParams struct {
+	currentRetry uint
+	minWaitSecs  uint
+	maxWaitSecs  uint
+	backoff      bool
+}
+
+type backoffTest struct {
+	testParams     backoffTestParams
+	testErr        bool
+	testReturn     bool
+	expectedResult time.Duration
+	errStr         string
+}
+
+func TestPromRetryWait(t *testing.T) {
+	setupLogging()
+
+	backoffTests := map[string]*backoffTest{
+		"retryCountNonZero": {
+			testParams: backoffTestParams{currentRetry: 0, minWaitSecs: 1, maxWaitSecs: 15, backoff: false},
+			testErr:    true,
+			errStr:     "should return an error if retryCount < 1",
+		},
+		"minWaitNonZero": {
+			testParams: backoffTestParams{currentRetry: 1, minWaitSecs: 0, maxWaitSecs: 15, backoff: false},
+			testErr:    true,
+			errStr:     "should return an error if minWait < 1",
+		},
+		"maxWaitNonZero": {
+			testParams: backoffTestParams{currentRetry: 1, minWaitSecs: 1, maxWaitSecs: 0, backoff: false},
+			testErr:    true,
+			errStr:     "should return an error if maxWait < 1",
+		},
+		"minWaitNotEqualMax": {
+			testParams: backoffTestParams{currentRetry: 1, minWaitSecs: 7, maxWaitSecs: 7, backoff: false},
+			testErr:    true,
+			errStr:     "should return an error if minWait = maxWait",
+		},
+		"minWaitGreaterThanMax": {
+			testParams: backoffTestParams{currentRetry: 1, minWaitSecs: 15, maxWaitSecs: 1, backoff: false},
+			testErr:    true,
+			errStr:     "should return an error if minWait > maxWait",
+		},
+		"noBackoffFirstRetry": {
+			testParams:     backoffTestParams{currentRetry: 1, minWaitSecs: 1, maxWaitSecs: 15, backoff: false},
+			testReturn:     true,
+			expectedResult: 1 * time.Second,
+			errStr:         "should return a retry wait of 1s",
+		},
+		"noBackoffSecondRetry": {
+			testParams:     backoffTestParams{currentRetry: 2, minWaitSecs: 1, maxWaitSecs: 15, backoff: false},
+			testReturn:     true,
+			expectedResult: 1 * time.Second,
+			errStr:         "should return a retry wait of 1s",
+		},
+		"noBackoffLaterRetry": {
+			testParams:     backoffTestParams{currentRetry: 27, minWaitSecs: 1, maxWaitSecs: 15, backoff: false},
+			testReturn:     true,
+			expectedResult: 1 * time.Second,
+			errStr:         "should return a retry wait of 1s",
+		},
+		"backoffFirstRetry": {
+			testParams:     backoffTestParams{currentRetry: 1, minWaitSecs: 1, maxWaitSecs: 15, backoff: true},
+			testReturn:     true,
+			expectedResult: 1 * time.Second,
+			errStr:         "should return a retry wait of 1s",
+		},
+		"backoffSecondRetry": {
+			testParams:     backoffTestParams{currentRetry: 2, minWaitSecs: 1, maxWaitSecs: 15, backoff: true},
+			testReturn:     true,
+			expectedResult: 2 * time.Second,
+			errStr:         "should return a retry wait of 2s",
+		},
+		"backoffThirdRetry": {
+			testParams:     backoffTestParams{currentRetry: 3, minWaitSecs: 1, maxWaitSecs: 15, backoff: true},
+			testReturn:     true,
+			expectedResult: 4 * time.Second,
+			errStr:         "should return a retry wait of 4s",
+		},
+		"backoffLaterRetry": {
+			testParams:     backoffTestParams{currentRetry: 27, minWaitSecs: 1, maxWaitSecs: 15, backoff: true},
+			testReturn:     true,
+			expectedResult: 15 * time.Second,
+			errStr:         "should return a retry wait of 15s",
+		},
+	}
+
+	for testName, backoffTest := range backoffTests {
+		if (!backoffTest.testErr && !backoffTest.testReturn) || (backoffTest.testErr && backoffTest.testReturn) {
+			t.Errorf("TestPromRetryWait: bad test configuration in test '%v': tests must have exactly one test condition", testName)
+		}
+		params := backoffTest.testParams
+		result, err := promRetryWait(params.currentRetry, params.minWaitSecs, params.maxWaitSecs, params.backoff)
+		if backoffTest.testErr && err == nil {
+			t.Errorf("promRetryWait(%v, %v, %v, %v) %v", params.currentRetry, params.minWaitSecs, params.maxWaitSecs, params.backoff, backoffTest.errStr)
+		}
+		// If we're not testing for errors and we got an error, that's a problem
+		if !backoffTest.testErr && err != nil {
+			t.Errorf("promRetryWait(%v, %v, %v, %v) unexpectedly returned an error %v", params.currentRetry, params.minWaitSecs, params.maxWaitSecs, params.backoff, err)
+		}
+
+		// Run tests for return values
+		if backoffTest.testReturn && result != backoffTest.expectedResult {
+			t.Errorf("promRetryWait(%v, %v, %v, %v) %v; expected %v got %v", params.currentRetry, params.minWaitSecs, params.maxWaitSecs, params.backoff, backoffTest.errStr, backoffTest.expectedResult, result)
+		}
+	}
+}

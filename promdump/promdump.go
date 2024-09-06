@@ -68,7 +68,11 @@ var (
 	baseURL                  = flag.String("url", defaultBaseUrl, "URL for Prometheus server API")
 	parsedURL                *url.URL
 	skipPromHostVerification = flag.Bool("skip_prometheus_host_verification", false, "bypasses TLS certificate verification for Prometheus queries (insecure)")
-	promApiTimeout           = flag.Duration("prometheus_api_timeout", 10, "the HTTP timeout to use for Prometheus API calls, in seconds (optional)")
+	promApiTimeout           = flag.Uint("prometheus_api_timeout", 10, "the HTTP timeout to use for Prometheus API calls, in seconds (optional)")
+	promRetries              = flag.Uint("prometheus_retry_count", 10, "the number of times to retry if calls to the Prometheus API result in a retryable error (optional)")
+	promRetryDelay           = flag.Uint("prometheus_retry_delay", 1, "the initial retry delay for Prometheus API calls, in seconds (optional)")
+	promRetryBackoff         = flag.Bool("prometheus_retry_backoff", true, "whether to use a backoff algorithm for scheduling Prometheus API retries (optional)")
+	promRetryMaxBackoff      = flag.Uint("prometheus_retry_max_backoff", 15, "the maximum retry delay for Prometheus API calls, in seconds; only used if backoff is enabled (optional)")
 	startTime                = flag.String("start_time", "", "RFC3339 `timestamp` to start querying at (e.g. 2023-03-13T01:00:00-0100).")
 	endTime                  = flag.String("end_time", "", "RFC3339 `timestamp` to end querying at (default now)")
 	periodDur                = flag.Duration("period", 0, "time period to get data for")
@@ -348,6 +352,79 @@ func writeErrIsFatal(err error) bool {
 	return false
 }
 
+func promErrIsFatal(err error) bool {
+	// Screen scraping errors like this is terrible but the Prometheus API does not return Error objects that can be
+	// tested with errors.Is
+	clientError, _ := regexp.Match("client error: 4", []byte(err.Error()))
+	parseError, _ := regexp.Match("bad_data: invalid parameter", []byte(err.Error()))
+	badCert, _ := regexp.Match("x509:", []byte(err.Error()))
+
+	if clientError {
+		// Client errors are always fatal (except 422 which is returned when we ask for too many samples and is handled
+		// separately). Client errors generally indicate that we passed a malformed metric to Prometheus.
+		return true
+	} else if parseError {
+		// The Prometheus API has told us that we've passed a bogus parameter. Malformed queries are fatal.
+		return true
+	} else if badCert {
+		// No point trying further metrics if there was a certificate error since those will also fail
+		return true
+	}
+	return false
+}
+
+func promErrIsRetryable(err error) bool {
+	// Screen scraping errors like this is terrible but the Prometheus API does not return Error objects that can be
+	// tested with errors.Is
+
+	// The Prometheus server will return a 503 if it is too busy to answer a query or the query times out
+	err503, _ := regexp.Match("server error: 503", []byte(err.Error()))
+
+	if os.IsTimeout(err) {
+		return true
+	} else if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	} else if err503 {
+		return true
+	}
+
+	return false
+}
+
+func promRetryWait(retryCount uint, minWait uint, maxWait uint, backoff bool) (time.Duration, error) {
+	if retryCount < uint(1) {
+		return 0, errors.New("promRetryWait: retryCount must be >= 1")
+	}
+	// TODO: Do these validations belong with the rest of the flag validation?
+	if minWait < uint(1) || maxWait < uint(1) {
+		return 0, errors.New("promRetryWait: minimum and maximum retry wait must both be >= 1")
+	}
+	if minWait >= maxWait {
+		return 0, errors.New("promRetryWait: the maximum retry wait must be greater than the minimum retry wait")
+	}
+	if backoff {
+		// Double the sleep interval if backoff is enabled
+		currentWait := minWait << (retryCount - 1)
+		if currentWait > maxWait {
+			// Don't go above the maximum backoff interval (don't back off indefinitely)
+			if *debugLogging {
+				logger.Printf("promRetryWait: backoff enabled; reached backoff maximum %v; sleeping %v seconds", maxWait, maxWait)
+			}
+			return time.Duration(maxWait) * time.Second, nil
+		} else {
+			if *debugLogging {
+				logger.Printf("promRetryWait: backoff enabled; sleeping %v seconds", currentWait)
+			}
+			return time.Duration(currentWait) * time.Second, nil
+		}
+	} else {
+		if *debugLogging {
+			logger.Printf("promRetryWait: backoff disabled; sleeping %v seconds", minWait)
+		}
+		return time.Duration(minWait) * time.Second, nil
+	}
+}
+
 func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration, batchesPerFile uint, filePrefix string) (uint, error) {
 	allBatchesFetched := false
 	if *debugLogging {
@@ -363,6 +440,7 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 			return 0, fmt.Errorf("batch settings could generate %v batches, which is an unreasonable number of batches", batches)
 		}
 		logger.Printf("exportMetric: querying metric '%v' from %v to %v in %v batches\n", metric, beginTS.Format(time.RFC3339), endTS.Format(time.RFC3339), batches)
+	batchBackoff:
 		for batch := uint(1); batch <= batches; batch++ {
 			// TODO: Refactor this into getBatch()?
 			queryTS := beginTS.Add(batchDur * time.Duration(batch))
@@ -378,10 +456,15 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 			} else {
 				logger.Printf("exportMetric: batch %v/%v (to %v)", batch, batches, queryTS.Format(time.Stamp))
 			}
-			// TODO: Add support for overriding the timeout; remember it can only go *smaller*
-			value, _, err := promApi.Query(ctx, query, queryTS)
 
-			if err != nil {
+			var value model.Value
+			var err error
+			for retryCount := uint(1); retryCount <= *promRetries; retryCount++ {
+				value, _, err = promApi.Query(ctx, query, queryTS)
+				if err == nil {
+					// The call completed successfully so exit the retry loop
+					break
+				}
 				// This is horrible but the golang prometheus_client swallows the 422 HTTP return code, so we have to
 				// scrape instead :(
 				tooManySamples, _ := regexp.Match("query processing would load too many samples into memory", []byte(err.Error()))
@@ -397,10 +480,26 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 					if batchDur.Seconds() <= 1 {
 						return 0, fmt.Errorf("failed to query Prometheus for metric %v - too much data even at minimum batch size", metric)
 					}
-					break
-				} else {
-					return 0, err
+					break batchBackoff
 				}
+
+				sleepTime, err := promRetryWait(retryCount, *promRetryDelay, *promRetryMaxBackoff, *promRetryBackoff)
+				if err != nil {
+					logger.Fatalf("exportMetric: failed to calculate retry delay: %v", err)
+				}
+
+				if promErrIsFatal(err) {
+					logger.Fatalf("exportMetric: fatal error while retrieving Prometheus data: %v", err)
+				} else if promErrIsRetryable(err) {
+					logger.Printf("exportMetric: encountered retryable error %v; retrying (%v of %v; waiting %v)", err, retryCount, *promRetries, sleepTime)
+				} else {
+					logger.Printf("exportMetric: encountered unclassified error %v; retrying (%v of %v; waiting %v)", err, retryCount, *promRetries, sleepTime)
+				}
+				if retryCount == *promRetries {
+					logger.Fatalf("exportMetric: exhausted retries while querying '%s'; giving up", query)
+				}
+
+				time.Sleep(sleepTime)
 			}
 
 			if value == nil {
@@ -665,7 +764,7 @@ func setupPromAPI(ctx context.Context, promURL url.URL) (v1.API, error) {
 	}
 
 	httpClient := &http.Client{
-		Timeout:   time.Second * *promApiTimeout,
+		Timeout:   time.Second * time.Duration(*promApiTimeout),
 		Transport: tr,
 	}
 
