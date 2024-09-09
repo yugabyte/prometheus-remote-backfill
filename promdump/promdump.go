@@ -483,9 +483,9 @@ func exportMetric(ctx context.Context, promApi v1.API, metric string, beginTS ti
 					break batchBackoff
 				}
 
-				sleepTime, err := promRetryWait(retryCount, *promRetryDelay, *promRetryMaxBackoff, *promRetryBackoff)
-				if err != nil {
-					logger.Fatalf("exportMetric: failed to calculate retry delay: %v", err)
+				sleepTime, retryErr := promRetryWait(retryCount, *promRetryDelay, *promRetryMaxBackoff, *promRetryBackoff)
+				if retryErr != nil {
+					logger.Fatalf("exportMetric: failed to calculate retry delay: %v", retryErr)
 				}
 
 				if promErrIsFatal(err) {
