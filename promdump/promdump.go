@@ -15,7 +15,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	ywclient "github.com/yugabyte/platform-go-client"
 	"io"
 	"log"
 	"math"
@@ -31,9 +30,11 @@ import (
 	"syscall"
 	"time"
 
+	ywclient "github.com/yugabyte/platform-go-client"
+
 	"github.com/dsnet/compress/bzip2"
 	"github.com/prometheus/client_golang/api"
-	"github.com/prometheus/client_golang/api/prometheus/v1"
+	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 )
 
@@ -494,15 +495,39 @@ func addToArchive(tw *tar.Writer, filename string) error {
 }
 
 func generateDefaultTarFilename() string {
-	switch *tarCompression {
-	case "gzip":
-		return fmt.Sprintf("promdump-%s-%s.tar.gz", *nodePrefix, time.Now().Format("20060102-150405")) // Format: YYYYMMDD-HHMMSS
-	case "bzip2":
-		return fmt.Sprintf("promdump-%s-%s.tar.bz2", *nodePrefix, time.Now().Format("20060102-150405"))
+	var prefix string
 
+	// Define a regular expression to match the node_prefix key-value pair in the metric string
+	re := regexp.MustCompile(`node_prefix="([^"]+)"`)
+
+	// Try to extract node_prefix from the metric
+	if *metric != "" {
+		matches := re.FindStringSubmatch(*metric)
+		if len(matches) > 1 {
+			prefix = matches[1] // Use the captured node_prefix value
+		}
 	}
 
-	return fmt.Sprintf("promdump-%s-%s.tar", *nodePrefix, time.Now().Format("20060102-150405"))
+	// If node_prefix is not found in metric, use nodePrefix flag
+	if prefix == "" && *nodePrefix != "" {
+		prefix = *nodePrefix
+	}
+
+	// If neither is available, use a default prefix
+	if prefix == "" {
+		return fmt.Sprintf("promdump-%s.tar", time.Now().Format("20060102-150405"))
+	}
+
+	// Generate the filename based on the compression type
+	switch *tarCompression {
+	case "gzip":
+		return fmt.Sprintf("promdump-%s-%s.tar.gz", prefix, time.Now().Format("20060102-150405"))
+	case "bzip2":
+		return fmt.Sprintf("promdump-%s-%s.tar.bz2", prefix, time.Now().Format("20060102-150405"))
+	default:
+		return fmt.Sprintf("promdump-%s-%s.tar", prefix, time.Now().Format("20060102-150405"))
+	}
+
 }
 
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
