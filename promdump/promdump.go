@@ -117,6 +117,10 @@ var (
 	customMetricCount uint // Holds custom metric file counts
 	logger            *log.Logger
 
+	skippedMetrics    = 0
+	successfulMetrics = 0
+	failedMetrics     = 0
+
 	// We'll refer to time.Now using this variable so that we can swap it out for a static time in the test suite
 	// as needed.
 	now = time.Now
@@ -1356,18 +1360,22 @@ func main() {
 			v.dumpSuccessful = true
 		}
 	}
+
+	totalMetrics := len(collectMetrics)
+
 	if *metric != "" {
+		totalMetrics += 1
 		customMetricCount, err = exportMetric(ctx, promApi, *metric, beginTS, endTS, *periodDur, *batchDur, *batchesPerFile, *out)
-		if err != nil {
-			logger.Fatalln("exportMetric:", err)
+		if err == nil {
+			successfulMetrics += 1
+		} else {
+			logger.Printf("exportMetric: export of custom metric '%v' failed with error %v", *metric, err)
+			failedMetrics += 1
 		}
 	}
 	logger.Println("main: Finished with Prometheus connection")
 
 	// TODO: Put this in a func?
-	skippedMetrics := 0
-	successfulMetrics := 0
-	failedMetrics := 0
 	for _, v := range collectMetrics {
 		if v.collect {
 			if v.dumpSuccessful {
@@ -1379,7 +1387,7 @@ func main() {
 			skippedMetrics += 1
 		}
 	}
-	logger.Printf("main: summary: %v metrics processed (skipped: %v dumped: %v failed: %v)", len(collectMetrics), skippedMetrics, successfulMetrics, failedMetrics)
+	logger.Printf("main: summary: %v metrics processed (skipped: %v dumped: %v failed: %v)", totalMetrics, skippedMetrics, successfulMetrics, failedMetrics)
 	if successfulMetrics < 1 {
 		logger.Fatalf("main: no metrics were dumped successfully; aborting")
 	} else if failedMetrics > 0 {
