@@ -646,39 +646,30 @@ func addToArchive(tw *tar.Writer, filename string) error {
 }
 
 func generateDefaultTarFilename() string {
-	var prefix string
 
-	// Define a regular expression to match the node_prefix key-value pair in the metric string
-	re := regexp.MustCompile(`node_prefix="([^"]+)"`)
+	var filename string
 
-	// Try to extract node_prefix from the metric
-	if *metric != "" {
-		matches := re.FindStringSubmatch(*metric)
-		if len(matches) > 1 {
-			prefix = matches[1] // Use the captured node_prefix value
+	// Start with the default prefix "promdump"
+	filename = "promdump"
+
+	// Check if nodePrefix is provided and append it to the filename if not empty
+	if nodePrefix != nil && *nodePrefix != "" {
+		filename = fmt.Sprintf("%s-%s", filename, *nodePrefix)
+
+	}
+	// Append the timestamp
+	filename = fmt.Sprintf("%s-%s", filename, time.Now().Format("20060102-150405"))
+	if tarCompression != nil {
+		switch *tarCompression {
+		case "gzip":
+			return filename + ".tar.gz"
+		case "bzip2":
+			return filename + ".tar.bz2"
 		}
 	}
 
-	// If node_prefix is not found in metric, use nodePrefix flag
-	if prefix == "" && *nodePrefix != "" {
-		prefix = *nodePrefix
-	}
-
-	// If neither is available, use a default prefix
-	if prefix == "" {
-		return fmt.Sprintf("promdump-%s.tar", time.Now().Format("20060102-150405"))
-	}
-
-	// Generate the filename based on the compression type
-	switch *tarCompression {
-	case "gzip":
-		return fmt.Sprintf("promdump-%s-%s.tar.gz", prefix, time.Now().Format("20060102-150405"))
-	case "bzip2":
-		return fmt.Sprintf("promdump-%s-%s.tar.bz2", prefix, time.Now().Format("20060102-150405"))
-	default:
-		return fmt.Sprintf("promdump-%s-%s.tar", prefix, time.Now().Format("20060102-150405"))
-	}
-
+	// Default to ".tar" if no compression type is specified
+	return filename + ".tar"
 }
 
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
@@ -1426,6 +1417,14 @@ func main() {
 						logger.Printf("Error cleaning files : %v", err)
 					}
 				}
+			}
+			if *out != "" {
+
+				_, err := cleanFiles(*out, customMetricCount, false)
+				if err != nil {
+					log.Printf("Error cleaning files : %v", err)
+				}
+
 			}
 		} else {
 			logger.Println("main: preserving metric export files because the --keep_files flag is set")
