@@ -31,11 +31,11 @@ import (
 	"syscall"
 	"time"
 
-	ywclient "github.com/yugabyte/platform-go-client"
+	"github.com/yugabyte/platform-go-client"
 
 	"github.com/dsnet/compress/bzip2"
 	"github.com/prometheus/client_golang/api"
-	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
+	"github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 )
 
@@ -647,29 +647,32 @@ func addToArchive(tw *tar.Writer, filename string) error {
 
 func generateDefaultTarFilename() string {
 
-	var filename string
+	var filename strings.Builder
 
-	// Start with the default prefix "promdump"
-	filename = "promdump"
+	// default prefix "promdump"
+	filename.WriteString("promdump")
 
-	// Check if nodePrefix is provided and append it to the filename if not empty
-	if nodePrefix != nil && *nodePrefix != "" {
-		filename = fmt.Sprintf("%s-%s", filename, *nodePrefix)
-
+	// Check nodePrefix is provided and append it to the filename if not empty
+	if *nodePrefix != "" {
+		fmt.Fprintf(&filename, "-%s", *nodePrefix)
 	}
+
 	// Append the timestamp
-	filename = fmt.Sprintf("%s-%s", filename, time.Now().Format("20060102-150405"))
+	fmt.Fprintf(&filename, "-%s", time.Now().Format("20060102-150405"))
+
+	// file extension based on compression type
 	if tarCompression != nil {
 		switch *tarCompression {
 		case "gzip":
-			return filename + ".tar.gz"
+			return filename.String() + ".tar.gz"
 		case "bzip2":
-			return filename + ".tar.bz2"
+			return filename.String() + ".tar.bz2"
 		}
 	}
 
 	// Default to ".tar" if no compression type is specified
-	return filename + ".tar"
+	return filename.String() + ".tar"
+
 }
 
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
