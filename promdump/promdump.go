@@ -15,7 +15,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	ywclient "github.com/yugabyte/platform-go-client"
 	"io"
 	"log"
 	"math"
@@ -31,6 +30,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/yugabyte/platform-go-client"
 
 	"github.com/dsnet/compress/bzip2"
 	"github.com/prometheus/client_golang/api"
@@ -645,15 +646,33 @@ func addToArchive(tw *tar.Writer, filename string) error {
 }
 
 func generateDefaultTarFilename() string {
-	switch *tarCompression {
-	case "gzip":
-		return fmt.Sprintf("promdump-%s-%s.tar.gz", *nodePrefix, now().Format("20060102-150405")) // Format: YYYYMMDD-HHMMSS
-	case "bzip2":
-		return fmt.Sprintf("promdump-%s-%s.tar.bz2", *nodePrefix, now().Format("20060102-150405"))
 
+	var filename strings.Builder
+
+	// default prefix "promdump"
+	filename.WriteString("promdump")
+
+	// Check nodePrefix is provided and append it to the filename if not empty
+	if *nodePrefix != "" {
+		fmt.Fprintf(&filename, "-%s", *nodePrefix)
 	}
 
-	return fmt.Sprintf("promdump-%s-%s.tar", *nodePrefix, now().Format("20060102-150405"))
+	// Append the timestamp
+	fmt.Fprintf(&filename, "-%s", time.Now().Format("20060102-150405"))
+
+	// file extension based on compression type
+	if tarCompression != nil {
+		switch *tarCompression {
+		case "gzip":
+			return filename.String() + ".tar.gz"
+		case "bzip2":
+			return filename.String() + ".tar.bz2"
+		}
+	}
+
+	// Default to ".tar" if no compression type is specified
+	return filename.String() + ".tar"
+
 }
 
 func getBatch(ctx context.Context, promApi v1.API, metric string, beginTS time.Time, endTS time.Time, periodDur time.Duration, batchDur time.Duration) ([]*model.SampleStream, error) {
@@ -1401,6 +1420,14 @@ func main() {
 						logger.Printf("Error cleaning files : %v", err)
 					}
 				}
+			}
+			if *out != "" {
+
+				_, err := cleanFiles(*out, customMetricCount, false)
+				if err != nil {
+					log.Printf("Error cleaning files : %v", err)
+				}
+
 			}
 		} else {
 			logger.Println("main: preserving metric export files because the --keep_files flag is set")
