@@ -1,8 +1,6 @@
 // promdump fetches time series points for a given metric from Prometheus server
 // and saves them into a series of json files. Files contain a serialized list of
 // SampleStream messages (see model/value.go).
-// Generated files can later be read by promremotewrite which will write the
-// points to a Prometheus remote storage.
 package main
 
 import (

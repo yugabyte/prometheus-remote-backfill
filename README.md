@@ -4,17 +4,16 @@ This repo is a fork of the [prometheus-remote-backfill](https://github.com/knyar
 that adds Yugabyte-specific enhancements to make it easier to export and collect metrics from YugabyteDB Anywhere on a
 per-Universe basis.
 
-The tools remain backward compatible but add additional modes and flags to streamline collection of Yugabyte metrics
-data.
+The promdump tool remains backward compatible but adds additional modes and flags to streamline collection of Yugabyte
+metrics data.
 
 * `promdump` - dumps time series data from Prometheus server into JSON files.
-* `promremotewrite` - sends data from JSON files to any service that implements
-  Prometheus [remote write API](https://prometheus.io/docs/operating/integrations/#remote-endpoints-and-storage).
 
-These tools can be used to backfill metric data from Prometheus into a
-long-term storage system that implements the write API. JSON files are used
-as intermediary storage format to allow manual changes to metric metadata
-(metric name and labels).
+This tools can be used to backfill metric data from Prometheus into other metrics stores such as VictoriaMetrics. JSON
+files are used as intermediary storage format to allow manual changes to metric metadata (metric name and labels).
+
+The `promremotewrite` utility that was included in the original `prometheus-remote-backfill` has been removed due to
+outdated dependencies with known security issues.
 
 ## promdump
 
@@ -29,8 +28,8 @@ error, the batch size will be halved and the operation retried.
 
 ## promremotewrite
 
-This utility is not used at Yugabyte. It remains in the repo and is built automatically but is not tested or routinely
-updated. Use at your own risk. 
+This utility is not used at Yugabyte. It has been removed from the repo due to known vulnerabilities in its
+dependencies.
 
 ## Example
 
@@ -40,11 +39,6 @@ storing 24hrs worth of data in each file:
     promdump --url=http://localhost:9090 \
       --metric='node_filesystem_free{job="node"}' \
       --out=fs_free.json --batch=12h --batches_per_file=2 --period=8760h
-
-Read resulting files and write metric data into Influxdb, issuing up to 5 concurrent API requests:
-
-    promremotewrite -concurrency=5 \
-      -url='http://localhost:8086/api/v1/prom/write?db=prom fs_free.json.*
 
 ## Command Line Reference
 
@@ -229,11 +223,6 @@ Flags in this section control aspects of how the exported data are written to di
 docker run --rm \
   -v "$PWD/promdump":/promdump \
   -w /promdump golang:1.19 \
-  go build \
-  -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'"
-docker run --rm \
-  -v "$PWD/promremotewrite":/promremotewrite \
-  -w /promremotewrite golang:1.19 \
   go build \
   -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'"
 ```
