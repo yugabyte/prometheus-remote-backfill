@@ -30,29 +30,12 @@ jobs:
       working-directory: ./promdump
       run: go test -v ./...
 
-    - name: Build promremotewrite
-      working-directory: ./promremotewrite
-      run: |
-        go get
-        go build -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
-
-    - name: Test promremotewrite
-      working-directory: ./promremotewrite
-      run: go test -v ./...
-
     - name: Compress artifacts
       run: |
         gzip promdump/promdump
-        gzip promremotewrite/promremotewrite
 
     - name: Upload promdump
       uses: actions/upload-artifact@v4
       with:
         name: promdump
         path: promdump/promdump.gz
-        
-    - name: Upload promremotewrite
-      uses: actions/upload-artifact@v4
-      with:
-        name: promremotewrite
-        path: promremotewrite/promremotewrite.gz
