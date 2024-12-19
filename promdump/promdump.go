@@ -55,14 +55,12 @@ var (
 	defaultBaseUrl = fmt.Sprintf("http://%v:%v", defaultYbaHostname, defaultPromPort)
 
 	// Also see init() below for aliases
-	logToFile     = flag.Bool("log_to_file", true, "write log output to file")
-	logToStderr   = flag.Bool("log_to_console", true, "write log output to console (on standard error)")
-	logFilename   = flag.String("log_filename", "promdump.log", "if logging to disk is enabled, write logs to this file")
-	debugLogging  = flag.Bool("debug", false, "enable additional debug logging")
-	version       = flag.Bool("version", false, "prints the promdump version and exits")
-	listUniverses = flag.Bool("list_universes", false, "prints the list of Universes known to YBA and exits; requires a --yba_api_token")
-	// The baseURL variable will report that it is unused because we're parsing the flag value directly into the
-	// parsedURL variable below.
+	logToFile                = flag.Bool("log_to_file", true, "write log output to file")
+	logToStderr              = flag.Bool("log_to_console", true, "write log output to console (on standard error)")
+	logFilename              = flag.String("log_filename", "promdump.log", "if logging to disk is enabled, write logs to this file")
+	debugLogging             = flag.Bool("debug", false, "enable additional debug logging")
+	version                  = flag.Bool("version", false, "prints the promdump version and exits")
+	listUniverses            = flag.Bool("list_universes", false, "prints the list of Universes known to YBA and exits; requires a --yba_api_token")
 	baseURL                  = flag.String("url", defaultBaseUrl, "URL for Prometheus server API")
 	parsedURL                *url.URL
 	skipPromHostVerification = flag.Bool("skip_prometheus_host_verification", false, "bypasses TLS certificate verification for Prometheus queries (insecure)")
@@ -1014,7 +1012,7 @@ func main() {
 
 		// If this is the --url flag, it may have a password in it that we need to redact
 		if f.Name == "url" {
-			// parsedURL is global!! We don't want to have to parse in more than one place.
+			// parsedURL is global!! This avoids an extraneous parse.
 			parsedURL, err = url.Parse(f.Value.String())
 			if err != nil {
 				logger.Printf("main: failed to parse flag '--url=%v' while logging flags: %v", f.Value, err)
@@ -1041,6 +1039,13 @@ func main() {
 
 	if flag.NArg() > 0 {
 		logger.Fatalf("Too many arguments: %v. Check for typos.", strings.Join(flag.Args(), " "))
+	}
+
+	if parsedURL == nil {
+		parsedURL, err = url.Parse(*baseURL)
+		if err != nil {
+			logger.Printf("main: failed to parse default Prometheus URL '%v': %v", *baseURL, err)
+		}
 	}
 
 	// Don't include ybaHostname in the list of flags that trigger YBA API mode because it has a default value
