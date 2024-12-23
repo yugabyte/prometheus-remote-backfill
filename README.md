@@ -171,8 +171,9 @@ that too many samples would be loaded into memory. The backoff mechanism halves 
 
 Flags in this section are applicable to YBA API Mode and Legacy Mode (see below). They do not apply to manual mode.
 
-These flags will enable or disable specific exports or jobs when exporting data from Prometheus. In general, these
-settings should be left at their defaults unless there is a compelling reason to do otherwise.  
+These flags will filter the metrics when exporting data from Prometheus. Most of these flags enable or disable specific
+exports or jobs. In general, these settings should be left at their defaults unless there is a compelling reason to do
+otherwise.  
 
 ##### Exporters
 
@@ -205,6 +206,67 @@ for only the specified nodes.
 |---------------------|-----------|----------|---------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `--nodes`           |           | v0.2.0   |         | Optional  | Collect metrics for only the specified subset of nodes. Accepts a comma separated list of node numbers or ranges. For example, `--nodes=1,3-6,14` would collect metrics for nodes 1, 3, 4, 5, 6, and 14. Mutually exclusive with `--instances`.                                             |
 | `--instances`       |           | v0.2.0   |         | Optional  | Collect metrics for only the specified subset of nodes. Accepts a comma separated list of instance names. For example, `--instances=yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14`. Mutually exclusive with `--nodes`. |
+
+#### Collection Level
+
+It can be extremely challenging to export tserver metrics from systems with very large numbers of nodes, tables, or
+tablets due to the sheer volume of data. The following flag can be used to apply the YBA "minimal" collection level
+rules to the dump, reducing the amount of data dumped and reducing dump runtime and size. Note that this setting can
+only *reduce* the amount of metrics data collected; if the YBA collection level is set to any level lower than
+`MINIMAL`, (e.g. if metrics collection is `OFF` in YBA), no metrics will be dumped. You can't dump what was never
+collected.
+
+| Canonical Flag Name  | Alias(es) | Added In | Default  | Required? | Description                                                                                                                                 |
+|----------------------|-----------|----------|----------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `--collection_level` |           | v0.7.0   | `normal` | Optional  | Limit the size of the dump by collecting only the metrics associated with the YBA "minimal" collection level. One of `normal` or `minimal`. |
+
+Minimal collection mode limits promdump to collecting only the following tserver metrics (where `*` matches anything):
+
+`async_replication_committed_lag_micros`,
+`async_replication_sent_lag_micros`,
+`block_cache_*`,
+`cpu_stime`,
+`cpu_utime`,
+`follower_lag_ms`,
+`follower_memory_pressure_rejections`,
+`generic_current_allocated_bytes`,
+`generic_heap_size`,
+`glog*`,
+`handler_latency_outbound_call_queue_time*`,
+`handler_latency_outbound_transfer*`,
+`handler_latency_yb_client*`,
+`handler_latency_yb_consensus_ConsensusService*`,
+`handler_latency_yb_cqlserver_CQLServerService*`,
+`handler_latency_yb_cqlserver_SQLProcessor*`,
+`handler_latency_yb_master*`,
+`handler_latency_yb_redisserver_RedisServerService_*`,
+`handler_latency_yb_tserver_TabletServerService*`,
+`handler_latency_yb_ysqlserver_SQLProcessor*`,
+`hybrid_clock_skew`,
+`involuntary_context_switches*`,
+`leader_memory_pressure_rejections`,
+`log_wal_size`,
+`majority_sst_files_rejections`,
+`operation_memory_pressure_rejections`,
+`rocksdb_current_version_sst_files_size`,
+`rpc_connections_alive`,
+`rpc_inbound_calls_created`,
+`rpc_incoming_queue_time*`,
+`rpcs_in_queue*`,
+`rpcs_queue_overflow`,
+`rpcs_timed_out_in_queue`,
+`spinlock_contention_time*`,
+`threads_running*`,
+`threads_started*`,
+`transaction_pool_cache*`,
+`voluntary_context_switches*`,
+`yb_ysqlserver_active_connection_total`,
+`yb_ysqlserver_connection_over_limit_total`,
+`yb_ysqlserver_connection_total`,
+`yb_ysqlserver_new_connection_total`
+
+This list (and the corresponding `promdump` code) was derived from the metrics level params configuration file
+`minimal_level_params.json` from the 2024.2.0-b145 YBA release.
 
 ### Output Flags
 

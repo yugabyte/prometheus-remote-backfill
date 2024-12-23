@@ -41,6 +41,14 @@ const defaultBatchDuration = 15 * time.Minute
 const defaultYbaHostname = "localhost"
 const defaultPromPort = 9090
 
+// Derived from the metrics level params configuration file `minimal_level_params.json` from the 2024.2.0-b145
+// YBA release. Check this file for changes periodically and merge them in!
+//
+// Full path in repo:
+//
+//	https://github.com/yugabyte/yugabyte-db/blob/2024.2.0.0-b145/managed/src/main/resources/metric/minimal_level_params.json
+const minimalCollectionPromRE = "async_replication_committed_lag_micros|async_replication_sent_lag_micros|block_cache_|cpu_stime|cpu_utime|follower_lag_ms|follower_memory_pressure_rejections|generic_current_allocated_bytes|generic_heap_size|glog|handler_latency_outbound_call_queue_time|handler_latency_outbound_transfer|handler_latency_yb_client|handler_latency_yb_consensus_ConsensusService|handler_latency_yb_cqlserver_CQLServerService|handler_latency_yb_cqlserver_SQLProcessor|handler_latency_yb_master|handler_latency_yb_redisserver_RedisServerService_|handler_latency_yb_tserver_TabletServerService|handler_latency_yb_ysqlserver_SQLProcessor|hybrid_clock_skew|involuntary_context_switches|leader_memory_pressure_rejections|log_wal_size|majority_sst_files_rejections|operation_memory_pressure_rejections|rocksdb_current_version_sst_files_size|rpc_connections_alive|rpc_inbound_calls_created|rpc_incoming_queue_time|rpcs_in_queue|rpcs_queue_overflow|rpcs_timed_out_in_queue|spinlock_contention_time|threads_running|threads_started|transaction_pool_cache|voluntary_context_switches|yb_ysqlserver_active_connection_total|yb_ysqlserver_connection_over_limit_total|yb_ysqlserver_connection_total|yb_ysqlserver_new_connection_total"
+
 type promExport struct {
 	exportName         string
 	jobName            string
@@ -79,6 +87,7 @@ var (
 	prefixValidation         = flag.Bool("node_prefix_validation", true, "set to false to disable node prefix validation")
 	universeName             = flag.String("universe_name", "", "the name of the Universe for which to collect metrics, as shown in the YBA UI")
 	universeUuid             = flag.String("universe_uuid", "", "the UUID of the Universe for which to collect metrics")
+	collectionLevel          = flag.String("collection_level", "normal", "the scope of metrics to collect; set to \"minimal\" to collect a subset of only critical metrics")
 	instanceList             = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
 	nodeSet                  = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
 	batchesPerFile           = flag.Uint("batches_per_file", 1, "batches per output file")
@@ -1053,6 +1062,10 @@ func main() {
 		useYbaApi = true
 	}
 
+	if *collectionLevel != "normal" && *collectionLevel != "minimal" {
+		logger.Fatalf("main: invalid collection level '%v': must be one of 'normal' or 'minimal'", *collectionLevel)
+	}
+
 	if useYbaApi {
 		if *ybaToken == "" {
 			logger.Fatalln("The --yba_api_token flag is required when using the YBA API. See the YBA API documentation at: https://api-docs.yugabyte.com/")
@@ -1315,6 +1328,9 @@ func main() {
 					// validated at an earlier stage, so if we've reached this point, it means we already know the
 					// prefix isn't required.
 					labels = append(labels, fmt.Sprintf("node_prefix=\"%s\"", *nodePrefix))
+				}
+				if *collectionLevel == "minimal" && v.exportName == "tserver_export" {
+					labels = append(labels, fmt.Sprintf("saved_name=~\"%s\"", minimalCollectionPromRE))
 				}
 				if instanceLabelString != "" {
 					labels = append(labels, instanceLabelString)
