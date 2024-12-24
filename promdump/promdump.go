@@ -1330,6 +1330,7 @@ func main() {
 					labels = append(labels, fmt.Sprintf("node_prefix=\"%s\"", *nodePrefix))
 				}
 				if *collectionLevel == "minimal" && v.exportName == "tserver_export" {
+					logger.Println("exportMetric: exporting tserver metrics at minimal collection level")
 					labels = append(labels, fmt.Sprintf("saved_name=~\"%s\"", minimalCollectionPromRE))
 				}
 				if instanceLabelString != "" {
