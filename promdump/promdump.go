@@ -87,7 +87,11 @@ var (
 	prefixValidation         = flag.Bool("node_prefix_validation", true, "set to false to disable node prefix validation")
 	universeName             = flag.String("universe_name", "", "the name of the Universe for which to collect metrics, as shown in the YBA UI")
 	universeUuid             = flag.String("universe_uuid", "", "the UUID of the Universe for which to collect metrics")
-	collectionLevel          = flag.String("collection_level", "normal", "the scope of metrics to collect; set to \"minimal\" to collect a subset of only critical metrics")
+	collectionLevel          = flag.String("collection_level", "normal", "the scope of metrics to collect; set to \"minimal\" to collect a subset of only critical metrics; mutually exclusive with the \"skip_..._metrics\" flags")
+	skipTableMetrics         = flag.Bool("skip_table_metrics", false, "reduce the size of the dump file by skipping collection of table level metrics from the tserver export; mutually exclusive with the \"collection_level\" flag")
+	skipTabletMetrics        = flag.Bool("skip_tablet_metrics", false, "reduce the size of the dump file by skipping collection of tablet (shard) level metrics from the tserver export; mutually exclusive with the \"collection_level\" flag")
+	skipServerMetrics        = flag.Bool("skip_tserver_server_metrics", false, "reduce the size of the dump file by skipping collection of server metrics from the tserver export; mutually exclusive with the \"collection_level\" flag")
+	skipUntypedMetrics       = flag.Bool("skip_tserver_untyped_metrics", false, "reduce the size of the dump file by skipping collection of untyped metrics from the tserver export; mutually exclusive with the \"collection_level\" flag")
 	instanceList             = flag.String("instances", "", "the instance name(s) for which to collect metrics (optional, mutually exclusive with --nodes; comma separated list, e.g. yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14; disables collection of platform metrics unless explicitly enabled with --platform")
 	nodeSet                  = flag.String("nodes", "", "the node number(s) for which to collect metrics (optional, mutually exclusive with --instances); comma separated list of node numbers or ranges, e.g. 1,3-6,14; disables collection of platform metrics unless explicitly requested with --platform")
 	batchesPerFile           = flag.Uint("batches_per_file", 1, "batches per output file")
@@ -1066,6 +1070,10 @@ func main() {
 		logger.Fatalf("main: invalid collection level '%v': must be one of 'normal' or 'minimal'", *collectionLevel)
 	}
 
+	if *collectionLevel != "normal" && (*skipTableMetrics || *skipTabletMetrics || *skipServerMetrics || *skipUntypedMetrics) {
+		logger.Fatalln("main: minimal collection level and tserver metrics filtering are mutually exclusive")
+	}
+
 	if useYbaApi {
 		if *ybaToken == "" {
 			logger.Fatalln("The --yba_api_token flag is required when using the YBA API. See the YBA API documentation at: https://api-docs.yugabyte.com/")
@@ -1329,9 +1337,27 @@ func main() {
 					// prefix isn't required.
 					labels = append(labels, fmt.Sprintf("node_prefix=\"%s\"", *nodePrefix))
 				}
-				if *collectionLevel == "minimal" && v.exportName == "tserver_export" {
-					logger.Println("exportMetric: exporting tserver metrics at minimal collection level")
-					labels = append(labels, fmt.Sprintf("saved_name=~\"%s\"", minimalCollectionPromRE))
+				if v.exportName == "tserver_export" {
+					if *skipTableMetrics {
+						logger.Println("exportMetric: skipping table level metrics collection")
+						labels = append(labels, fmt.Sprint("metric_type!=\"table\""))
+					}
+					if *skipTabletMetrics {
+						logger.Println("exportMetric: skipping tablet (shard) level metrics collection")
+						labels = append(labels, fmt.Sprint("metric_type!=\"tablet\""))
+					}
+					if *skipServerMetrics {
+						logger.Println("exportMetric: skipping tablet server server-level metrics collection")
+						labels = append(labels, fmt.Sprint("metric_type!=\"server\""))
+					}
+					if *skipUntypedMetrics {
+						logger.Println("exportMetric: skipping tablet server untyped metrics collection")
+						labels = append(labels, fmt.Sprint("metric_type!=\"\""))
+					}
+					if *collectionLevel == "minimal" {
+						logger.Println("exportMetric: exporting tserver metrics at minimal collection level")
+						labels = append(labels, fmt.Sprintf("saved_name=~\"%s\"", minimalCollectionPromRE))
+					}
 				}
 				if instanceLabelString != "" {
 					labels = append(labels, instanceLabelString)
