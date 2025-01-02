@@ -207,18 +207,26 @@ for only the specified nodes.
 | `--nodes`           |           | v0.2.0   |         | Optional  | Collect metrics for only the specified subset of nodes. Accepts a comma separated list of node numbers or ranges. For example, `--nodes=1,3-6,14` would collect metrics for nodes 1, 3, 4, 5, 6, and 14. Mutually exclusive with `--instances`.                                             |
 | `--instances`       |           | v0.2.0   |         | Optional  | Collect metrics for only the specified subset of nodes. Accepts a comma separated list of instance names. For example, `--instances=yb-prod-appname-n1,yb-prod-appname-n3,yb-prod-appname-n4,yb-prod-appname-n5,yb-prod-appname-n6,yb-prod-appname-n14`. Mutually exclusive with `--nodes`. |
 
-#### Collection Level
+#### Tserver Export Filtering
 
 It can be extremely challenging to export tserver metrics from systems with very large numbers of nodes, tables, or
-tablets due to the sheer volume of data. The following flag can be used to apply the YBA "minimal" collection level
-rules to the dump, reducing the amount of data dumped and reducing dump runtime and size. Note that this setting can
-only *reduce* the amount of metrics data collected; if the YBA collection level is set to any level lower than
-`MINIMAL`, (e.g. if metrics collection is `OFF` in YBA), no metrics will be dumped. You can't dump what was never
-collected.
+tablets due to the sheer volume of data. The following flags can be used to reduce the amount of data dumped and
+therefore the dump runtime and size.
 
-| Canonical Flag Name  | Alias(es) | Added In | Default  | Required? | Description                                                                                                                                 |
-|----------------------|-----------|----------|----------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| `--collection_level` |           | v0.7.0   | `normal` | Optional  | Limit the size of the dump by collecting only the metrics associated with the YBA "minimal" collection level. One of `normal` or `minimal`. |
+Note that the these flags can only *reduce* the amount of metrics data collected; if the YBA collection level has been
+reduced (e.g. if metrics collection is `OFF` in YBA), only the metrics included in the YBA collection level will be
+included in the dump. You can't dump what was never collected.
+
+The various `--skip` flags below are mutually exclusive with the `--collection_level` flag, i.e. you can specify any
+combination of `--skip` flags or the `--collection_level` flag but not both.
+
+| Canonical Flag Name              | Alias(es) | Added In | Default  | Required? | Description                                                                                                                                                              |
+|----------------------------------|-----------|----------|----------|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--collection_level`             |           | v0.7.0   | `normal` | Optional  | Limit the size of the dump by collecting only the metrics associated with the YBA "minimal" collection level. One of `normal` or `minimal`. A very aggressive reduction. |
+| `--skip_table_metrics`           |           | v0.8.0   | `false`  | Optional  | Limit the size of the dump by suppressing table-level metrics. A significant reduction.                                                                                  |
+| `--skip_tablet_metrics`          |           | v0.8.0   | `false`  | Optional  | Limit the size of the dump by suppressing tablet (shard) level metrics. A moderate reduction.                                                                            |
+| `--skip_tserver_server_metrics`  |           | v0.8.0   | `false`  | Optional  | Limit the size of the dump by suppressing tablet server server-level metrics. A small reduction.                                                                         |
+| `--skip_tserver_untyped_metrics` |           | v0.8.0   | `false`  | Optional  | Limit the size of the dump by suppressing untyped tserver metrics. A miniscule reduction.                                                                                |
 
 Minimal collection mode limits promdump to collecting only the following tserver metrics (where `*` matches anything):
 
