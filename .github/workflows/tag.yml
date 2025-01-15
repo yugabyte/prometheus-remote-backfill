@@ -26,7 +26,7 @@ jobs:
       # github.ref_name is the tag or branch name
       run: |
         go get
-        go build -ldflags=" -X 'main.AppVersion=${{ github.ref_name }}' -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
+        CGO_ENABLED=0 go build -ldflags=" -X 'main.AppVersion=${{ github.ref_name }}' -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
 
     - name: Test promdump
       working-directory: ./promdump
