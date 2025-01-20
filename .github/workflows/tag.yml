@@ -26,7 +26,8 @@ jobs:
       # github.ref_name is the tag or branch name
       run: |
         go get
-        CGO_ENABLED=0 go build -ldflags=" -s -w -X 'main.AppVersion=${{ github.ref_name }}' -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
+        CGO_ENABLED=0 go build -ldflags=" -s -w -X 'main.AppVersion=${{ github.ref_name }}' -X 'main.SymbolStatus=STRIPPED' -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
+        CGO_ENABLED=0 go build -o promdump-debug -ldflags=" -X 'main.AppVersion=${{ github.ref_name }}' -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
 
     - name: Test promdump
       working-directory: ./promdump
@@ -35,9 +36,10 @@ jobs:
     - name: Compress artifacts
       run: |
         gzip promdump/promdump
+        gzip promdump/promdump-debug
 
     - name: Upload promdump
       uses: actions/upload-artifact@v4
       with:
         name: promdump
-        path: promdump/promdump.gz
+        path: promdump/promdump*.gz
