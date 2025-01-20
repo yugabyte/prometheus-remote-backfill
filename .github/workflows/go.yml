@@ -24,7 +24,7 @@ jobs:
       working-directory: ./promdump
       run: |
         go get
-        CGO_ENABLED=0 go build -ldflags=" -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
+        CGO_ENABLED=0 go build -ldflags=" -s -w -X 'main.CommitHash=$(git rev-parse HEAD)' -X 'main.BuildTime=$(date -Iseconds)'" -v ./...
 
     - name: Test promdump
       working-directory: ./promdump
