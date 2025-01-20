@@ -133,9 +133,10 @@ var (
 	// as needed.
 	now = time.Now
 
-	AppVersion = "DEV BUILD"
-	CommitHash = "POPULATED_BY_BUILD"
-	BuildTime  = "POPULATED_BY_BUILD"
+	AppVersion   = "DEV BUILD"
+	SymbolStatus = "NON-STRIPPED"
+	CommitHash   = "POPULATED_BY_BUILD"
+	BuildTime    = "POPULATED_BY_BUILD"
 )
 
 func init() {
@@ -999,7 +1000,7 @@ func main() {
 	}
 	logger, _ = initLogging(logFile)
 
-	verString := fmt.Sprintf("promdump version %v from commit %v built %v\n", AppVersion, CommitHash, BuildTime)
+	verString := fmt.Sprintf("promdump version %v %v from commit %v built %v\n", AppVersion, SymbolStatus, CommitHash, BuildTime)
 
 	if *version {
 		fmt.Printf(verString)
